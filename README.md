@@ -11,7 +11,8 @@ the C runtime linked statically.
 - **SIMD.** Byte scans (newline counting, search, line endings, ASCII checks) use SSE2 and
   AVX2, with AVX2 chosen at runtime.
 - **Syntax highlighting** for about 20 languages, computed incrementally.
-- **Small.** About 450 KB as a single exe with a static CRT. No runtime DLLs beyond the Windows system DLLs.
+- **Small.** About 680 KB as a single exe with a static CRT and Paper Mono embedded (about
+  470 KB without it). No runtime DLLs beyond the Windows system DLLs.
 
 ## Build
 
@@ -28,8 +29,8 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-The exe is `target/<triple>/release/note.exe`. CI (`.github/workflows/build.yml`) runs the
-tests and uploads the exe as the `note-x86_64-windows` artifact.
+The exe is `target/<triple>/release/note.exe`. Prebuilt exes are attached to each GitHub
+release (see [Releasing](#releasing)).
 
 Run the tests with `cargo test`.
 
@@ -105,8 +106,12 @@ default.
 
 ```ini
 [editor]
-font = Consolas
+font = Paper Mono, Cascadia Mono, Consolas
 font_size = 12
+font_weight = 400
+bold_keywords = false
+line_height = 1.2
+font_smoothing = cleartype
 tab_width = 4
 word_wrap = false
 
@@ -127,6 +132,39 @@ Chords can be written in nano notation (`^S-Z`) or by name (`ctrl+shift+z`, `alt
 `current_line_bg`, `gutter_bg`, `gutter_fg`, `status_bg`, `status_fg`, `hint_key_fg`,
 `hint_fg`, and the token colours `keyword`, `type`, `string`, `number`, `comment`,
 `preproc`, `function`, `punct`, `heading`.
+
+Font keys in `[editor]`:
+
+- `font` takes a comma-separated list of typefaces in order of preference, each at most 31
+  characters. The first one Windows matches is used, then Consolas. The default is
+  `Paper Mono`.
+- `font_size` is in points (6 to 72). `Ctrl+plus` and `Ctrl+minus` zoom from this size.
+- `font_weight` is 100 to 900, or a name: `thin`, `extralight`, `light`, `regular`
+  (`normal`), `medium`, `semibold`, `bold`, `extrabold`, `black`. The default is 400.
+- `bold_keywords` draws keywords and types in a bold face (weight 700). Cells keep the same
+  width, so columns still line up. The default is `false`.
+- `line_height` is the line pitch as a multiple of the font height, clamped to 1.0 to 2.5.
+  Text is centred in each line. The default is 1.2.
+- `font_smoothing` is `cleartype`, `grayscale` or `none`. The default is `cleartype`.
+
+## Fonts
+
+The exe embeds **Paper Mono** Regular and Bold and registers them with GDI for this process
+only, so nothing is installed system-wide. Paper Mono is by Paper Design (Lost Coast Labs),
+based on Geist Mono by Vercel. See <https://paper.design/mono> and
+<https://github.com/paper-design/paper-mono>.
+
+The font files are embedded unmodified under the SIL Open Font License 1.1. The license is
+in [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
+
+To leave the font out, build without default features:
+
+```
+cargo build --release --no-default-features
+```
+
+That exe is about 210 KB smaller. Set `font` in `note.ini` to any installed typeface instead.
+Without the embedded font, the default `Paper Mono` falls back to Consolas.
 
 ## Architecture
 
@@ -153,6 +191,21 @@ cargo run --release --example bench -- <file>
 
 It reports the ASCII check, a plain copy for comparison, decode, line indexing, a byte count
 and a full lex pass.
+
+## Releasing
+
+Releases are cut by hand. Run the **Release** workflow (`.github/workflows/release.yml`)
+from the Actions tab, on the branch to release from.
+
+- `bump`: which part of the latest `vX.Y.Z` tag to increase: `patch`, `minor` or `major`.
+- `prerelease`: marks the GitHub release as a pre-release.
+- `draft`: creates the release as a draft, to review before publishing.
+
+The workflow runs `cargo test --release`, sets `version` in `Cargo.toml`, and commits
+`Release vX.Y.Z` to the branch. It then creates an annotated tag, builds
+`note-vX.Y.Z-x86_64-windows.exe`, and publishes it with `SHA256SUMS.txt` and a changelog of
+the commits since the previous tag. If there is no tag yet, a patch release publishes the
+version in `Cargo.toml` as it is, and a minor or major release bumps it.
 
 ## Known limitations
 

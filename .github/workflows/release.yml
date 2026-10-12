@@ -1,0 +1,284 @@
+name: Release
+
+# Manual only. There is deliberately no push or pull_request trigger.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver component to bump
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      prerelease:
+        description: Mark the GitHub release as a pre-release
+        type: boolean
+        default: false
+      draft:
+        description: Create the GitHub release as a draft
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# One release at a time. A second dispatch waits instead of racing on the branch and tags.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history and tags, needed for git describe and the changelog
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compute version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          REF_TYPE: ${{ github.ref_type }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Semver bump. $1 is X.Y.Z, $2 is patch, minor or major. Prints the new version.
+          bump_version() {
+            local major minor patch
+            IFS=. read -r major minor patch <<< "$1"
+            case "$2" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+              *) echo "Unknown bump '$2'" >&2; return 1 ;;
+            esac
+            printf '%s.%s.%s\n' "$major" "$minor" "$patch"
+          }
+
+          if [[ "$REF_TYPE" != "branch" ]]; then
+            echo "::error::Dispatch this workflow from a branch. The release commit is pushed back to that branch." >&2
+            exit 1
+          fi
+
+          # Which version is the base, and what gets released:
+          #  - With a tag: the previous version is the nearest reachable vX.Y.Z tag, and the
+          #    release is that version bumped by $BUMP.
+          #  - Without any tag (first release): the base is the version in Cargo.toml.
+          #    A patch bump releases that version as-is (for example 0.1.0). A minor or major
+          #    bump releases the bumped version (0.2.0 or 1.0.0).
+          PREV_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)"
+
+          if [[ -n "$PREV_TAG" ]]; then
+            BASE="${PREV_TAG#v}"
+            if [[ ! "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Latest tag '$PREV_TAG' is not plain X.Y.Z" >&2
+              exit 1
+            fi
+            VERSION="$(bump_version "$BASE" "$BUMP")"
+          else
+            BASE="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]*)".*/\1/')"
+            if [[ ! "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Cargo.toml version '$BASE' is not plain X.Y.Z" >&2
+              exit 1
+            fi
+            if [[ "$BUMP" == "patch" ]]; then
+              VERSION="$BASE"
+            else
+              VERSION="$(bump_version "$BASE" "$BUMP")"
+            fi
+          fi
+
+          TAG="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists" >&2
+            exit 1
+          fi
+
+          echo "Previous tag: ${PREV_TAG:-<none>}"
+          echo "Release: $TAG (bump: $BUMP, branch: $BRANCH)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          cargo test --release
+
+      - name: Write release notes
+        # Runs before the release commit exists, so that commit is not listed.
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NOTES="$RUNNER_TEMP/release-notes.md"
+
+          if [[ -n "$PREV_TAG" ]]; then
+            RANGE="${PREV_TAG}..HEAD"
+            HEADER="## Changes since ${PREV_TAG}"
+          else
+            RANGE="HEAD"
+            HEADER="## Initial release"
+          fi
+
+          {
+            printf '%s\n\n' "$HEADER"
+            count=0
+            while IFS=$'\x1f' read -r full short author subject; do
+              printf -- '- %s ([%s](%s/%s/commit/%s)) — %s\n' \
+                "$subject" "$short" "$SERVER_URL" "$REPO" "$full" "$author"
+              count=$((count + 1))
+            done < <(git log --no-merges --format='%H%x1f%h%x1f%an%x1f%s' "$RANGE")
+            if (( count == 0 )); then
+              printf '%s\n' '- No commits since the previous release.'
+            fi
+            if [[ -n "$PREV_TAG" ]]; then
+              printf '\n**Full changelog**: %s/%s/compare/%s...%s\n' \
+                "$SERVER_URL" "$REPO" "$PREV_TAG" "$TAG"
+            fi
+          } > "$NOTES"
+
+          cat "$NOTES"
+
+      - name: Set version in Cargo.toml
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Only the first "version = " line, which is the one in [package].
+          sed -i "0,/^version = /{s/^version = \"[^\"]*\"/version = \"${VERSION}\"/}" Cargo.toml
+
+          expected="version = \"${VERSION}\""
+          actual="$(grep -m1 '^version = ' Cargo.toml)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Cargo.toml has '$actual', expected '$expected'" >&2
+            exit 1
+          fi
+
+      - name: Update Cargo.lock
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git ls-files Cargo.lock)" ]]; then
+            cargo update -p note --offline || cargo generate-lockfile
+
+            locked="$(sed -n '/^name = "note"$/{n;p}' Cargo.lock)"
+            if [[ "$locked" != "version = \"${VERSION}\"" ]]; then
+              echo "::error::Cargo.lock has '$locked', expected version ${VERSION}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Commit, tag and push
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bot=(git -c user.name="github-actions[bot]" \
+                   -c user.email="41898099+github-actions[bot]@users.noreply.github.com")
+
+          git add Cargo.toml
+          if [[ -n "$(git ls-files Cargo.lock)" ]]; then
+            git add Cargo.lock
+          fi
+          # --allow-empty: the first patch release may leave Cargo.toml unchanged.
+          "${bot[@]}" commit --allow-empty -m "Release $TAG"
+          "${bot[@]}" tag -a "$TAG" -m "Release $TAG"
+
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+
+  build:
+    name: Build Windows executable
+    needs: prepare
+    runs-on: windows-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release
+
+      - name: Name the executable and write SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "note-${env:TAG}-x86_64-windows.exe"
+          Copy-Item -LiteralPath 'target/release/note.exe' -Destination $exe
+
+          # Same format as sha256sum: lowercase hex, two spaces, file name, LF, no BOM.
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $line = "$hash  $exe`n"
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), $line, [System.Text.UTF8Encoding]::new($false))
+          Get-Content -LiteralPath 'SHA256SUMS.txt'
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            note-v*-x86_64-windows.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      DRAFT: ${{ inputs.draft }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts # one sub-directory per artifact name
+
+      - name: Create GitHub release
+        run: |
+          set -euo pipefail
+          exe="artifacts/windows-release/note-${TAG}-x86_64-windows.exe"
+          sums="artifacts/windows-release/SHA256SUMS.txt"
+          notes="artifacts/release-notes/release-notes.md"
+
+          args=()
+          if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease); fi
+          if [[ "$DRAFT" == "true" ]]; then args+=(--draft); fi
+
+          gh release create "$TAG" "$exe" "$sums" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "note $TAG" \
+            --notes-file "$notes" \
+            "${args[@]}"

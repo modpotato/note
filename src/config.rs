@@ -579,12 +579,28 @@ impl Keymap {
 // Config
 // ---------------------------------------------------------------------------
 
+/// Anti-aliasing mode for the text font.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontSmoothing {
+    ClearType,
+    Grayscale,
+    Off,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// Typeface name, at most 31 characters (LOGFONT limit).
-    pub font_face: String,
+    /// Typefaces in order of preference, each at most 31 characters (LOGFONT limit). The
+    /// renderer uses the first one Windows matches, then Consolas.
+    pub font_faces: Vec<String>,
     /// Points, clamped to 6..=72.
     pub font_size: i32,
+    /// Weight of the text font, 100..=900 (400 = regular).
+    pub font_weight: i32,
+    /// Draw keywords and types with a bold face (weight 700). Cell widths do not change.
+    pub bold_keywords: bool,
+    /// Line pitch as a multiple of the font height, clamped to 1.0..=2.5.
+    pub line_height: f32,
+    pub font_smoothing: FontSmoothing,
     /// Columns per tab stop, clamped to 1..=16.
     pub tab_width: usize,
     pub insert_spaces: bool,
@@ -603,8 +619,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            font_face: "Cascadia Mono".to_string(),
+            font_faces: vec!["Paper Mono".to_string()],
             font_size: 11,
+            font_weight: 400,
+            bold_keywords: false,
+            line_height: 1.2,
+            font_smoothing: FontSmoothing::ClearType,
             tab_width: 4,
             insert_spaces: false,
             line_numbers: true,
@@ -764,6 +784,32 @@ fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
+/// Longest font preference list read from `font =`. Extra entries are ignored.
+const MAX_FONT_FACES: usize = 8;
+
+/// A numeric weight 100..=900, or one of the CSS-style names.
+fn parse_weight(v: &str) -> Option<i32> {
+    let w = match v.to_ascii_lowercase().as_str() {
+        "thin" => 100,
+        "extralight" => 200,
+        "light" => 300,
+        "regular" | "normal" => 400,
+        "medium" => 500,
+        "semibold" => 600,
+        "bold" => 700,
+        "extrabold" => 800,
+        "black" => 900,
+        n => {
+            let n: i32 = n.parse().ok()?;
+            if !(100..=900).contains(&n) {
+                return None;
+            }
+            n
+        }
+    };
+    Some(w)
+}
+
 fn set_bool(v: &str, slot: &mut bool) {
     if let Some(b) = parse_bool(v) {
         *slot = b;
@@ -774,14 +820,44 @@ fn apply_editor(cfg: &mut Config, key: &str, value: &str) {
     let int = value.parse::<i64>().ok();
     match key {
         "font" => {
-            let face: String = value.chars().take(31).collect();
-            if !face.is_empty() {
-                cfg.font_face = face;
+            // Comma-separated preference list, e.g. "Paper Mono, Cascadia Mono, Consolas".
+            let faces: Vec<String> = value
+                .split(',')
+                .map(|f| f.trim().chars().take(31).collect::<String>())
+                .filter(|f| !f.is_empty())
+                .take(MAX_FONT_FACES)
+                .collect();
+            if !faces.is_empty() {
+                cfg.font_faces = faces;
             }
         }
         "font_size" => {
             if let Some(n) = int {
                 cfg.font_size = n.clamp(6, 72) as i32;
+            }
+        }
+        "font_weight" => {
+            if let Some(w) = parse_weight(value) {
+                cfg.font_weight = w;
+            }
+        }
+        "bold_keywords" => set_bool(value, &mut cfg.bold_keywords),
+        "line_height" => {
+            if let Ok(f) = value.parse::<f32>() {
+                if f.is_finite() {
+                    cfg.line_height = f.clamp(1.0, 2.5);
+                }
+            }
+        }
+        "font_smoothing" => {
+            let mode = match value.to_ascii_lowercase().as_str() {
+                "cleartype" => Some(FontSmoothing::ClearType),
+                "grayscale" => Some(FontSmoothing::Grayscale),
+                "none" => Some(FontSmoothing::Off),
+                _ => None,
+            };
+            if let Some(m) = mode {
+                cfg.font_smoothing = m;
             }
         }
         "tab_width" => {
@@ -837,10 +913,21 @@ const INI_HEADER: &str = "\
 
 const INI_EDITOR: &str = "
 [editor]
-; Typeface name, at most 31 characters. Falls back to Consolas. Default: Cascadia Mono
-font = Cascadia Mono
+; Typeface names, comma-separated, in order of preference. Each is at most 31 characters.
+; The first one installed is used, then Consolas. Paper Mono is embedded in the exe.
+; Default: Paper Mono
+font = Paper Mono
 ; Font size in points, 6..72. Default: 11
 font_size = 11
+; Weight 100..900, or thin, extralight, light, regular, normal, medium, semibold, bold,
+; extrabold, black. Default: 400
+font_weight = 400
+; Draw keywords and types in bold (weight 700). Cell widths stay the same. Default: false
+bold_keywords = false
+; Line pitch as a multiple of the font height, 1.0..2.5. Default: 1.2
+line_height = 1.2
+; Text anti-aliasing: cleartype, grayscale or none. Default: cleartype
+font_smoothing = cleartype
 ; Columns per tab stop, 1..16. Default: 4
 tab_width = 4
 ; Tab inserts spaces instead of a tab character. Default: false
@@ -1242,7 +1329,7 @@ mod tests {
         assert_eq!(cfg.theme.tok[1], Rgb(0xaa, 0xbb, 0xcc));
         assert_eq!(cfg.theme.tok[5], Rgb(0x6a, 0x99, 0x55));
         assert_eq!(cfg.theme.tok[3], light.tok[3]);
-        assert_eq!(cfg.font_face, "Consolas");
+        assert_eq!(cfg.font_faces, vec!["Consolas"]);
         assert_eq!(cfg.font_size, 14);
         assert_eq!(
             cfg.tab_width, 4,
@@ -1315,7 +1402,7 @@ mod tests {
              auto_indent = false\n\
              caret_width = 3\n",
         );
-        assert_eq!(cfg.font_face, "Consolas");
+        assert_eq!(cfg.font_faces, vec!["Consolas"]);
         assert!(cfg.insert_spaces);
         assert!(cfg.word_wrap);
         assert!(!cfg.show_hints);
@@ -1359,11 +1446,79 @@ mod tests {
     fn font_name_is_truncated_to_logfont_limit() {
         let long = "x".repeat(50);
         let cfg = Config::parse(&format!("[editor]\nfont = {long}\n"));
-        assert_eq!(cfg.font_face.chars().count(), 31);
+        assert_eq!(cfg.font_faces[0].chars().count(), 31);
         assert_eq!(
-            Config::parse("[editor]\nfont =\n").font_face,
-            "Cascadia Mono"
+            Config::parse("[editor]\nfont =\n").font_faces,
+            vec!["Paper Mono"],
+            "an empty value keeps the default"
         );
+    }
+
+    #[test]
+    fn font_list_is_split_trimmed_and_capped() {
+        let cfg = Config::parse("[editor]\nfont = Paper Mono, Cascadia Mono ,, Consolas,\n");
+        assert_eq!(
+            cfg.font_faces,
+            vec!["Paper Mono", "Cascadia Mono", "Consolas"]
+        );
+        let many = (0..20)
+            .map(|i| format!("F{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let cfg = Config::parse(&format!("[editor]\nfont = {many}\n"));
+        assert_eq!(cfg.font_faces.len(), MAX_FONT_FACES);
+        assert_eq!(Config::parse("[editor]\nfont = , ,\n").font_faces, vec!["Paper Mono"]);
+    }
+
+    #[test]
+    fn font_weight_accepts_numbers_and_names() {
+        assert_eq!(Config::default().font_weight, 400);
+        assert_eq!(Config::parse("[editor]\nfont_weight = 300\n").font_weight, 300);
+        assert_eq!(Config::parse("[editor]\nfont_weight = 900\n").font_weight, 900);
+        for (name, w) in [
+            ("thin", 100),
+            ("ExtraLight", 200),
+            ("light", 300),
+            ("regular", 400),
+            ("normal", 400),
+            ("medium", 500),
+            ("semibold", 600),
+            ("bold", 700),
+            ("extrabold", 800),
+            ("black", 900),
+        ] {
+            let cfg = Config::parse(&format!("[editor]\nfont_weight = {name}\n"));
+            assert_eq!(cfg.font_weight, w, "{name}");
+        }
+        for bad in ["0", "99", "901", "1000", "heavy", "", "-400"] {
+            let cfg = Config::parse(&format!("[editor]\nfont_weight = {bad}\n"));
+            assert_eq!(cfg.font_weight, 400, "{bad:?} keeps the default");
+        }
+    }
+
+    #[test]
+    fn line_height_is_clamped_and_rejects_non_numbers() {
+        assert_eq!(Config::default().line_height, 1.2);
+        assert_eq!(Config::parse("[editor]\nline_height = 1.5\n").line_height, 1.5);
+        assert_eq!(Config::parse("[editor]\nline_height = 0.2\n").line_height, 1.0);
+        assert_eq!(Config::parse("[editor]\nline_height = 9\n").line_height, 2.5);
+        for bad in ["nan", "inf", "-inf", "tall", "1,5"] {
+            let cfg = Config::parse(&format!("[editor]\nline_height = {bad}\n"));
+            assert_eq!(cfg.line_height, 1.2, "{bad}");
+        }
+    }
+
+    #[test]
+    fn bold_keywords_and_smoothing_are_read() {
+        assert!(!Config::default().bold_keywords);
+        assert_eq!(Config::default().font_smoothing, FontSmoothing::ClearType);
+        let cfg = Config::parse("[editor]\nbold_keywords = yes\nfont_smoothing = grayscale\n");
+        assert!(cfg.bold_keywords);
+        assert_eq!(cfg.font_smoothing, FontSmoothing::Grayscale);
+        let cfg = Config::parse("[editor]\nfont_smoothing = NONE\n");
+        assert_eq!(cfg.font_smoothing, FontSmoothing::Off);
+        let cfg = Config::parse("[editor]\nfont_smoothing = fuzzy\n");
+        assert_eq!(cfg.font_smoothing, FontSmoothing::ClearType);
     }
 
     #[test]
@@ -1387,6 +1542,10 @@ mod tests {
         for key in [
             "font",
             "font_size",
+            "font_weight",
+            "bold_keywords",
+            "line_height",
+            "font_smoothing",
             "tab_width",
             "insert_spaces",
             "line_numbers",
@@ -1470,7 +1629,10 @@ mod tests {
         assert!((6..=72).contains(&cfg.font_size));
         assert!((1..=16).contains(&cfg.tab_width));
         assert!((1..=10).contains(&cfg.caret_width));
-        assert!(cfg.font_face.chars().count() <= 31);
+        assert!(!cfg.font_faces.is_empty() && cfg.font_faces.len() <= MAX_FONT_FACES);
+        assert!(cfg.font_faces.iter().all(|f| f.chars().count() <= 31));
+        assert!((100..=900).contains(&cfg.font_weight));
+        assert!((1.0..=2.5).contains(&cfg.line_height));
         assert_eq!(cfg.theme.tok[0], cfg.theme.fg);
     }
 
