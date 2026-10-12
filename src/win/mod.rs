@@ -25,7 +25,7 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows_sys::Win32::UI::Controls::{SetScrollInfo, SetWindowTheme};
+use windows_sys::Win32::UI::Controls::{SetScrollInfo, SetWindowTheme, ShowScrollBar};
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -581,6 +581,9 @@ impl App {
         if self.dark {
             enable_dark_window(hwnd);
         }
+        if self.editor.wrap {
+            show_hscroll(hwnd, false);
+        }
         self.focused = true;
         self.sync_title(hwnd);
         self.after_command(hwnd);
@@ -660,6 +663,8 @@ impl App {
     /// restart the caret blink and repaint.
     fn after_command(&mut self, hwnd: HWND) {
         let lay = self.layout();
+        // Wrapping width follows the window and the font, so it is refreshed on every command.
+        self.editor.wrap_cols = lay.cols;
         self.editor.ensure_cursor_visible(lay.rows, lay.cols);
         self.sync_title(hwnd);
         self.caret_visible = true;
@@ -1080,7 +1085,18 @@ impl App {
             Action::DeleteWordRight => self.editor.delete_word_right(),
             Action::ToggleLineNumbers => self.config.line_numbers = !self.config.line_numbers,
             Action::ToggleWrap => {
-                self.editor.message = Some("Soft wrap not supported yet".to_string());
+                let on = !self.editor.wrap;
+                self.editor.wrap = on;
+                self.config.word_wrap = on;
+                self.editor.scroll_subrow = 0;
+                self.editor.scroll_col = 0;
+                show_hscroll(hwnd, !on);
+                self.editor.message = Some(if on {
+                    "Soft wrap enabled"
+                } else {
+                    "Soft wrap disabled"
+                }
+                .to_string());
             }
             Action::ToggleHints => self.config.show_hints = !self.config.show_hints,
             Action::ZoomIn => self.change_zoom(hwnd, 1),
@@ -1270,17 +1286,14 @@ impl App {
 
     /// Byte offset under a client point, clamped to the visible text area.
     fn pos_at(&self, lay: Layout, x: i32, y: i32) -> usize {
-        let row = ((y.max(0) / lay.lh) as usize).min(lay.rows - 1);
-        let last = self.editor.buf.line_count() - 1;
-        let line = (self.editor.scroll_line + row).min(last);
+        let row = (y.max(0) / lay.lh) as usize;
         let dx = x - lay.gutter;
         let col = if dx <= 0 {
             0
         } else {
             ((dx + lay.cw / 2) / lay.cw) as usize
         };
-        self.editor
-            .pos_from_visual(line, col + self.editor.scroll_col)
+        self.editor.pos_from_view(row, col, lay.rows)
     }
 
     /// True when a mouse point lands in the text area and the mouse is free to use.
@@ -1389,6 +1402,9 @@ impl App {
     }
 
     fn scroll_cols(&mut self, n: isize) {
+        if self.editor.wrap {
+            return;
+        }
         self.editor.scroll_col = (self.editor.scroll_col as isize + n).max(0) as usize;
     }
 
@@ -1405,13 +1421,20 @@ impl App {
             SB_LINEDOWN => self.scroll_axis(vertical, step),
             SB_PAGEUP => self.scroll_axis(vertical, -page),
             SB_PAGEDOWN => self.scroll_axis(vertical, page),
-            SB_TOP if vertical => self.editor.scroll_line = 0,
+            SB_TOP if vertical => {
+                self.editor.scroll_line = 0;
+                self.editor.scroll_subrow = 0;
+            }
             SB_TOP => self.editor.scroll_col = 0,
-            SB_BOTTOM if vertical => self.editor.scroll_line = last,
+            SB_BOTTOM if vertical => {
+                self.editor.scroll_line = last;
+                self.editor.scroll_subrow = 0;
+            }
             SB_THUMBTRACK | SB_THUMBPOSITION => {
                 let pos = track_position(hwnd, bar);
                 if vertical {
                     self.editor.scroll_line = pos.min(last);
+                    self.editor.scroll_subrow = 0;
                 } else {
                     self.editor.scroll_col = pos;
                 }
@@ -1436,6 +1459,14 @@ fn redraw(hwnd: HWND) {
     // SAFETY: a null rect invalidates the whole client area of a valid window.
     unsafe {
         InvalidateRect(hwnd, null(), 0);
+    }
+}
+
+/// Shows or hides the horizontal scrollbar. Soft wrap hides it, since lines never run wide.
+fn show_hscroll(hwnd: HWND, show: bool) {
+    // SAFETY: plain call on a valid window handle.
+    unsafe {
+        ShowScrollBar(hwnd, SB_HORZ, show as i32);
     }
 }
 

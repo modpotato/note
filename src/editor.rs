@@ -26,6 +26,16 @@ pub struct Editor {
     pub preferred_col: Option<usize>,
     pub scroll_line: usize,
     pub scroll_col: usize,
+    /// Soft wrap (visual only; the buffer is unchanged). In wrap mode `scroll_line` and
+    /// `scroll_subrow` address visual rows, and `scroll_col` stays 0.
+    pub wrap: bool,
+    /// Text columns available to the wrapper, set by the window. Wrapping uses at least 8.
+    pub wrap_cols: usize,
+    /// Index of the first visual row shown, inside the logical line `scroll_line`.
+    pub scroll_subrow: usize,
+    /// Set by End on a wrapped row. The cursor then belongs to the end of the row above,
+    /// although its byte offset is also the start of the next row.
+    end_affinity: bool,
     pub cut_buffer: Vec<u8>,
     /// Consecutive ^K calls append to `cut_buffer`.
     pub last_was_cut_line: bool,
@@ -71,6 +81,10 @@ impl Editor {
             preferred_col: None,
             scroll_line: 0,
             scroll_col: 0,
+            wrap: cfg.word_wrap,
+            wrap_cols: 80,
+            scroll_subrow: 0,
+            end_affinity: false,
             cut_buffer: Vec::new(),
             last_was_cut_line: false,
             path: None,
@@ -109,6 +123,8 @@ impl Editor {
         self.preferred_col = None;
         self.scroll_line = 0;
         self.scroll_col = 0;
+        self.scroll_subrow = 0;
+        self.end_affinity = false;
         self.last_was_cut_line = false;
         self.message = None;
     }
@@ -162,6 +178,7 @@ impl Editor {
     /// Movement primitive: updates the cursor and anchor, and starts a new undo group.
     fn place(&mut self, pos: usize, extend: bool) {
         let pos = align_back(&self.buf, pos);
+        self.end_affinity = false;
         if extend {
             if self.anchor.is_none() {
                 self.anchor = Some(self.cursor);
@@ -179,6 +196,7 @@ impl Editor {
         self.anchor = Some(0);
         self.cursor = len;
         self.preferred_col = None;
+        self.end_affinity = false;
     }
 
     pub fn move_cursor(&mut self, m: Move, extend: bool) {
@@ -189,6 +207,7 @@ impl Editor {
             m,
             Move::Up | Move::Down | Move::PageUp(_) | Move::PageDown(_)
         );
+        let mut end_affinity = false;
         let target = match m {
             Move::Left => match sel {
                 Some((s, _)) if !extend => s,
@@ -198,25 +217,28 @@ impl Editor {
                 Some((_, e)) if !extend => e,
                 _ => next_char(&self.buf, cur),
             },
-            Move::LineHome => {
-                let line = self.buf.line_of(cur);
-                let ls = self.buf.line_start(line);
-                let le = self.buf.line_end(line);
-                let mut fnw = ls;
-                while fnw < le && matches!(self.buf.byte_at(fnw), b' ' | b'\t') {
-                    fnw += 1;
-                }
-                if cur == fnw && fnw != ls {
-                    ls
-                } else {
-                    fnw
-                }
+            Move::LineHome if self.wrap => self.wrap_home(cur),
+            Move::LineEnd if self.wrap => {
+                let (pos, at_row_end) = self.wrap_line_end(cur);
+                end_affinity = at_row_end;
+                pos
             }
+            Move::LineHome => self.smart_home(self.buf.line_of(cur), cur),
             Move::LineEnd => self.buf.line_end(self.buf.line_of(cur)),
             Move::WordLeft => word_left(&self.buf, cur),
             Move::WordRight => word_right(&self.buf, cur),
             Move::DocStart => 0,
             Move::DocEnd => self.buf.len(),
+            Move::Up | Move::Down | Move::PageUp(_) | Move::PageDown(_) if self.wrap => {
+                let (down, n) = match m {
+                    Move::Up => (false, 1),
+                    Move::Down => (true, 1),
+                    Move::PageUp(r) => (false, r.clamp(1, 1 << 30)),
+                    Move::PageDown(r) => (true, r.clamp(1, 1 << 30)),
+                    _ => unreachable!("guarded above"),
+                };
+                self.wrap_vertical(cur, down, n)
+            }
             Move::Up | Move::Down | Move::PageUp(_) | Move::PageDown(_) => {
                 let step: isize = match m {
                     Move::Up => -1,
@@ -243,8 +265,24 @@ impl Editor {
             }
         };
         self.place(target, extend);
+        self.end_affinity = end_affinity;
         if !keeps_col {
             self.preferred_col = None;
+        }
+    }
+
+    /// Smart home for logical line `line`: first non-blank, then column 0, toggling.
+    fn smart_home(&self, line: usize, cur: usize) -> usize {
+        let ls = self.buf.line_start(line);
+        let le = self.buf.line_end(line);
+        let mut fnw = ls;
+        while fnw < le && matches!(self.buf.byte_at(fnw), b' ' | b'\t') {
+            fnw += 1;
+        }
+        if cur == fnw && fnw != ls {
+            ls
+        } else {
+            fnw
         }
     }
 
@@ -298,6 +336,7 @@ impl Editor {
     fn after_edit(&mut self) {
         self.anchor = None;
         self.preferred_col = None;
+        self.end_affinity = false;
         let line = self.buf.take_first_dirty_line();
         self.highlighter.invalidate_from(line);
         let len = self.buf.len();
@@ -869,6 +908,10 @@ impl Editor {
     /// keeps a 1-line margin when the viewport has more than 2 rows. Horizontal scrolls
     /// in jumps of cols/4.
     pub fn ensure_cursor_visible(&mut self, rows: usize, cols: usize) {
+        if self.wrap {
+            self.ensure_visible_wrapped(rows);
+            return;
+        }
         let line = self.buf.line_of(self.cursor);
         if rows > 0 {
             let margin = if rows > 2 { 1 } else { 0 };
@@ -891,13 +934,294 @@ impl Editor {
         }
     }
 
+    /// Scrolls by `lines` logical lines, or by visual rows in wrap mode.
     pub fn scroll_by(&mut self, lines: isize) {
+        if self.wrap {
+            let w = self.wrap_width();
+            let (line, sub) = self.top_row(w);
+            let n = lines.unsigned_abs();
+            let (nl, ns) = if lines < 0 {
+                self.vrow_back(line, sub, n, w)
+            } else {
+                self.vrow_fwd(line, sub, n, w)
+            };
+            self.scroll_line = nl;
+            self.scroll_subrow = ns;
+            return;
+        }
         let max = (self.buf.line_count() - 1) as isize;
         self.scroll_line = (self.scroll_line as isize)
             .saturating_add(lines)
             .clamp(0, max) as usize;
     }
+
+    // ----- soft wrap -----------------------------------------------------------
+    //
+    // A visual row is a (logical line, sub) pair; `sub` indexes `wrap_rows(line)`. Every
+    // helper here touches only the lines it needs, so the cost depends on the rows asked
+    // for, never on the size of the file.
+
+    /// Text columns used for wrapping: `wrap_cols`, at least 8.
+    pub fn wrap_width(&self) -> usize {
+        self.wrap_cols.max(8)
+    }
+
+    /// Fills `out` with the byte offset where each visual row of `line` starts. The first
+    /// entry is always the line start. See `wrap_rows_buf` for the breaking rules.
+    pub fn wrap_rows(&self, line: usize, width: usize, out: &mut Vec<usize>) {
+        wrap_rows_buf(&self.buf, self.tw(), line, width, out);
+    }
+
+    /// The view top as a visual row (line, sub), clamped to the document.
+    pub(crate) fn top_row(&self, width: usize) -> (usize, usize) {
+        let line = self.scroll_line.min(self.buf.line_count() - 1);
+        if !self.wrap {
+            return (line, 0);
+        }
+        let mut rows = Vec::new();
+        self.wrap_rows(line, width, &mut rows);
+        (line, self.scroll_subrow.min(rows.len() - 1))
+    }
+
+    /// Index of the visual row that shows `pos`, where `rows` are the row starts of its line.
+    fn sub_of(&self, pos: usize, rows: &[usize]) -> usize {
+        let k = rows.partition_point(|&s| s <= pos).saturating_sub(1);
+        if self.end_affinity && k > 0 && rows[k] == pos {
+            k - 1
+        } else {
+            k
+        }
+    }
+
+    /// Visual column of `pos` inside the row that starts at `rs`.
+    fn vcol_in_row(&self, rs: usize, pos: usize) -> usize {
+        cell_offset(pos.saturating_sub(rs), self.tw(), |i| self.buf.byte_at(rs + i))
+    }
+
+    /// Byte position in the visual row [rs, re) nearest to column `col`. A row that is
+    /// followed by another stops before the break, so the position stays on this row.
+    fn row_pos(&self, rs: usize, re: usize, last: bool, col: usize) -> usize {
+        let n = re - rs;
+        let off = offset_of_vcol(n, col, self.tw(), |i| self.buf.byte_at(rs + i));
+        if off < n || last {
+            rs + off
+        } else {
+            prev_char(&self.buf, re)
+        }
+    }
+
+    /// The visual row `n` rows after (line, sub), clamped to the last row of the document.
+    fn vrow_fwd(&self, line: usize, sub: usize, n: usize, width: usize) -> (usize, usize) {
+        let last = self.buf.line_count() - 1;
+        let (mut line, mut sub, mut n) = (line, sub, n);
+        let mut rows = Vec::new();
+        loop {
+            self.wrap_rows(line, width, &mut rows);
+            let sub_now = sub.min(rows.len() - 1);
+            let remaining = rows.len() - 1 - sub_now;
+            if n <= remaining {
+                return (line, sub_now + n);
+            }
+            if line >= last {
+                return (line, rows.len() - 1);
+            }
+            n -= remaining + 1;
+            line += 1;
+            sub = 0;
+        }
+    }
+
+    /// The visual row `n` rows before (line, sub), clamped to the first row of the document.
+    fn vrow_back(&self, line: usize, sub: usize, n: usize, width: usize) -> (usize, usize) {
+        let (mut line, mut sub, mut n) = (line, sub, n);
+        let mut rows = Vec::new();
+        loop {
+            if n <= sub {
+                return (line, sub - n);
+            }
+            n -= sub + 1;
+            if line == 0 {
+                return (0, 0);
+            }
+            line -= 1;
+            self.wrap_rows(line, width, &mut rows);
+            sub = rows.len() - 1;
+        }
+    }
+
+    /// Number of visual rows from `top` to visual row (line, sub), or None when that is
+    /// more than `limit` rows or lies above `top`. Stops counting once `limit` is passed.
+    fn view_distance(
+        &self,
+        top: (usize, usize),
+        line: usize,
+        sub: usize,
+        width: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        let (tl, tk) = top;
+        if line < tl || (line == tl && sub < tk) {
+            return None;
+        }
+        let mut rows = Vec::new();
+        let (mut l, mut from, mut d) = (tl, tk, 0usize);
+        while l < line {
+            self.wrap_rows(l, width, &mut rows);
+            d += rows.len().saturating_sub(from);
+            if d > limit {
+                return None;
+            }
+            from = 0;
+            l += 1;
+        }
+        let total = d + sub - from;
+        (total <= limit).then_some(total)
+    }
+
+    /// Wrap-mode scroll fix-up: keeps the cursor row inside the view with a one-row margin
+    /// when the view has more than two rows. Jumps straight to the target top instead of
+    /// walking from the old one, so a cursor far away costs no more than the view height.
+    fn ensure_visible_wrapped(&mut self, rows: usize) {
+        self.scroll_col = 0;
+        let w = self.wrap_width();
+        let margin = if rows > 2 { 1 } else { 0 };
+        let cur = self.cursor;
+        let line = self.buf.line_of(cur);
+        let mut row_starts = Vec::new();
+        self.wrap_rows(line, w, &mut row_starts);
+        let sub = self.sub_of(cur, &row_starts);
+        let top = self.top_row(w);
+
+        let above = self.vrow_back(line, sub, margin, w);
+        if above < top {
+            (self.scroll_line, self.scroll_subrow) = above;
+            return;
+        }
+        let limit = rows.max(1) - 1 - margin;
+        if self.view_distance(top, line, sub, w, limit).is_none() {
+            (self.scroll_line, self.scroll_subrow) = self.vrow_back(line, sub, limit, w);
+        }
+    }
+
+    /// Visual row and column of the cursor inside the view, both 0-based. The row counts
+    /// from the view top and is None when the cursor is above the view, or more than a
+    /// screen-sized distance below it. Column is relative to the text start (wrap mode:
+    /// the column in its row; no wrap: after horizontal scrolling).
+    pub fn cursor_view_pos(&self) -> Option<(usize, usize)> {
+        if !self.wrap {
+            let (line, col) = self.cursor_line_col();
+            if line < self.scroll_line || col < self.scroll_col {
+                return None;
+            }
+            return Some((line - self.scroll_line, col - self.scroll_col));
+        }
+        let w = self.wrap_width();
+        let line = self.buf.line_of(self.cursor);
+        let mut row_starts = Vec::new();
+        self.wrap_rows(line, w, &mut row_starts);
+        let sub = self.sub_of(self.cursor, &row_starts);
+        let col = self.vcol_in_row(row_starts[sub], self.cursor);
+        let row = self.view_distance(self.top_row(w), line, sub, w, VIEW_LIMIT_ROWS)?;
+        Some((row, col))
+    }
+
+    /// Byte offset under a view cell: `row` visual rows below the view top (in wrap mode;
+    /// a logical line without wrap) and column `col` from the text start. `rows_hint` is
+    /// the number of visible rows, and `row` is clamped to it. Clamps to the document.
+    pub fn pos_from_view(&self, row: usize, col: usize, rows_hint: usize) -> usize {
+        if !self.wrap {
+            let line = self.scroll_line.saturating_add(row);
+            return self.pos_from_visual(line, col + self.scroll_col);
+        }
+        let row = if rows_hint > 0 {
+            row.min(rows_hint - 1)
+        } else {
+            row
+        };
+        let w = self.wrap_width();
+        let (top_line, top_sub) = self.top_row(w);
+        let (line, sub) = self.vrow_fwd(top_line, top_sub, row, w);
+        let mut row_starts = Vec::new();
+        self.wrap_rows(line, w, &mut row_starts);
+        let last = sub + 1 >= row_starts.len();
+        let re = if last {
+            self.buf.line_end(line)
+        } else {
+            row_starts[sub + 1]
+        };
+        self.row_pos(row_starts[sub], re, last, col)
+    }
+
+    /// Home in wrap mode. Moves to the start of the visual row. From the row start it goes
+    /// to the logical line start, and on the first row it uses the smart-home rule.
+    fn wrap_home(&self, cur: usize) -> usize {
+        let line = self.buf.line_of(cur);
+        let mut row_starts = Vec::new();
+        self.wrap_rows(line, self.wrap_width(), &mut row_starts);
+        let sub = self.sub_of(cur, &row_starts);
+        let rs = row_starts[sub];
+        if sub > 0 {
+            if cur != rs {
+                rs
+            } else {
+                self.buf.line_start(line)
+            }
+        } else {
+            self.smart_home(line, cur)
+        }
+    }
+
+    /// End in wrap mode. On a row that wraps, the end is the start of the next row, flagged
+    /// so the cursor is drawn at the end of this row. Returns the flag too.
+    fn wrap_line_end(&self, cur: usize) -> (usize, bool) {
+        let line = self.buf.line_of(cur);
+        let mut row_starts = Vec::new();
+        self.wrap_rows(line, self.wrap_width(), &mut row_starts);
+        let sub = self.sub_of(cur, &row_starts);
+        if sub + 1 < row_starts.len() {
+            (row_starts[sub + 1], true)
+        } else {
+            (self.buf.line_end(line), false)
+        }
+    }
+
+    /// Up, Down, PageUp and PageDown in wrap mode: `n` visual rows down or up, keeping the
+    /// preferred column. At the document edge the cursor goes to the start or the end.
+    fn wrap_vertical(&mut self, cur: usize, down: bool, n: usize) -> usize {
+        let w = self.wrap_width();
+        let line = self.buf.line_of(cur);
+        let mut row_starts = Vec::new();
+        self.wrap_rows(line, w, &mut row_starts);
+        let sub = self.sub_of(cur, &row_starts);
+        let col = match self.preferred_col {
+            Some(c) => c,
+            None => self.vcol_in_row(row_starts[sub], cur),
+        };
+        self.preferred_col = Some(col);
+        let (tl, tk) = if down {
+            self.vrow_fwd(line, sub, n, w)
+        } else {
+            self.vrow_back(line, sub, n, w)
+        };
+        if (tl, tk) == (line, sub) {
+            return if down { self.buf.len() } else { 0 };
+        }
+        if tl != line {
+            self.wrap_rows(tl, w, &mut row_starts);
+        }
+        let k = tk.min(row_starts.len() - 1);
+        let last = k + 1 >= row_starts.len();
+        let re = if last {
+            self.buf.line_end(tl)
+        } else {
+            row_starts[k + 1]
+        };
+        self.row_pos(row_starts[k], re, last, col)
+    }
 }
+
+/// Rows that `cursor_view_pos` will count before giving up. Far beyond any screen.
+const VIEW_LIMIT_ROWS: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -1060,6 +1384,70 @@ fn map_pos(
         return clamp(new_ls);
     }
     clamp((p as isize + before + deltas[k]).max(new_ls))
+}
+
+/// Byte offsets where each visual row of `line` starts (see `Editor::wrap_rows`). Cells are
+/// chars, with tabs advancing to the next stop measured from the row start. A row breaks
+/// before the first word whose end does not fit in `width`; a word that fits nowhere is cut
+/// at `width`. Whitespace may run past the edge (it hangs), so a break is only ever taken
+/// before a non-blank char. A break is always past the row start, so the scan terminates.
+///
+/// Each char is examined at most twice, so the cost is linear in the line's length.
+pub(crate) fn wrap_rows_buf(
+    buf: &Buffer,
+    tab_width: usize,
+    line: usize,
+    width: usize,
+    out: &mut Vec<usize>,
+) {
+    out.clear();
+    let w = width.max(1);
+    let tw = tab_width.max(1);
+    let ls = buf.line_start(line);
+    let le = buf.line_end(line);
+    out.push(ls);
+    let mut rs = ls;
+    let mut col = 0usize;
+    // Start of the last word in this row, the best break so far.
+    let mut brk: Option<usize> = None;
+    let mut prev_ws = false;
+    let mut i = ls;
+    while i < le {
+        let b = buf.byte_at(i);
+        let ws = b == b' ' || b == b'\t';
+        if ws {
+            col += if b == b'\t' { tw - col % tw } else { 1 };
+            prev_ws = true;
+            i += 1;
+            continue;
+        }
+        if i > rs && prev_ws {
+            brk = Some(i);
+        }
+        if i > rs && col + 1 > w {
+            // The char does not fit: break at the last word start, or cut right here.
+            let next = brk.unwrap_or(i);
+            out.push(next);
+            rs = next;
+            col = 0;
+            brk = None;
+            prev_ws = false;
+            i = next;
+            continue;
+        }
+        col += 1;
+        prev_ws = false;
+        i += utf8_char_len(buf, i, le);
+    }
+}
+
+/// Byte length of the char at `i`, not running past `end`.
+fn utf8_char_len(buf: &Buffer, i: usize, end: usize) -> usize {
+    let mut n = 1;
+    while i + n < end && is_cont(buf.byte_at(i + n)) {
+        n += 1;
+    }
+    n
 }
 
 fn indent_len(line: &[u8]) -> usize {
@@ -2289,5 +2677,374 @@ mod tests {
         e.delete_forward();
         e.backspace();
         assert_eq!(text(&e), "");
+    }
+
+    // ----- soft wrap -----------------------------------------------------
+
+    /// Editor on `text` with soft wrap on at `width` columns.
+    fn wrapped(text: &str, width: usize) -> Editor {
+        let mut e = ed(text);
+        e.wrap = true;
+        e.wrap_cols = width;
+        e
+    }
+
+    /// Text of each visual row of `line` when wrapped at `width`.
+    fn rows_at(e: &Editor, line: usize, width: usize) -> Vec<String> {
+        let mut starts = Vec::new();
+        e.wrap_rows(line, width, &mut starts);
+        let le = e.buf.line_end(line);
+        (0..starts.len())
+            .map(|k| {
+                let end = starts.get(k + 1).copied().unwrap_or(le);
+                String::from_utf8(e.buf.slice(starts[k], end)).expect("utf-8")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wrap_rows_breaks_after_the_last_word_that_fits() {
+        let e = ed("aaa bbb ccc ddd eee");
+        assert_eq!(rows_at(&e, 0, 8), ["aaa bbb ", "ccc ddd ", "eee"]);
+        assert_eq!(rows_at(&e, 0, 7), ["aaa bbb ", "ccc ddd ", "eee"]);
+        let mut starts = Vec::new();
+        e.wrap_rows(0, 8, &mut starts);
+        assert_eq!(starts, vec![0, 8, 16]);
+    }
+
+    #[test]
+    fn wrap_rows_hard_breaks_long_unbreakable_word() {
+        let e = ed("abcdefghijkl");
+        assert_eq!(rows_at(&e, 0, 5), ["abcde", "fghij", "kl"]);
+        // A long word after a short one: the short word stays, the long one is cut.
+        let e = ed("ab abcdefghijk cd");
+        let rows = rows_at(&e, 0, 6);
+        assert_eq!(rows[0], "ab ", "break before the long word");
+        assert_eq!(rows.concat(), "ab abcdefghijk cd", "rows cover the whole line");
+        assert!(rows.iter().skip(1).all(|r| r.chars().count() <= 6));
+    }
+
+    #[test]
+    fn wrap_rows_trailing_spaces_hang_past_the_edge() {
+        let e = ed("aaa      bbb");
+        assert_eq!(rows_at(&e, 0, 8), ["aaa      ", "bbb"]);
+        let e = ed("          ");
+        assert_eq!(rows_at(&e, 0, 8), ["          "], "a blank run never breaks");
+    }
+
+    #[test]
+    fn wrap_rows_tabs_stop_relative_to_the_row_start() {
+        // Tab stops are every 4 cells from the row start, not from the line start.
+        let e = ed("ab\tcd ef");
+        assert_eq!(rows_at(&e, 0, 8), ["ab\tcd ", "ef"]);
+        let mut e = ed("aaaaaaaa b\tc");
+        e.wrap = true;
+        e.wrap_cols = 8;
+        assert_eq!(rows_at(&e, 0, 8), ["aaaaaaaa ", "b\tc"]);
+        // Cursor on 'c' in the second row: 'b' is 1 cell, the tab takes 3 more, so col 4.
+        e.set_cursor(11, false);
+        assert_eq!(e.cursor_view_pos(), Some((1, 4)));
+    }
+
+    #[test]
+    fn wrap_rows_empty_lines_and_exact_width() {
+        let e = ed("aaaa\n\nbb");
+        assert_eq!(rows_at(&e, 1, 8), [""], "empty line is one row");
+        let mut starts = Vec::new();
+        e.wrap_rows(1, 8, &mut starts);
+        assert_eq!(starts, vec![5]);
+
+        let e = ed("abcdefgh");
+        assert_eq!(rows_at(&e, 0, 8), ["abcdefgh"], "exactly W wide is one row");
+        let e = ed("abcdefghi");
+        assert_eq!(rows_at(&e, 0, 8), ["abcdefgh", "i"]);
+    }
+
+    #[test]
+    fn wrap_rows_multibyte_chars_count_one_cell_and_never_split() {
+        let e = ed("héllo wörld");
+        assert_eq!(rows_at(&e, 0, 8), ["héllo ", "wörld"]);
+        let e = ed("ééééééééé");
+        assert_eq!(rows_at(&e, 0, 8), ["éééééééé", "é"]);
+        // Row starts land on char boundaries.
+        let mut starts = Vec::new();
+        e.wrap_rows(0, 8, &mut starts);
+        assert_eq!(starts, vec![0, 16]);
+    }
+
+    #[test]
+    fn wrap_rows_reuses_out_without_growing_it() {
+        let e = ed("aaa bbb ccc ddd eee fff ggg hhh iii");
+        let mut out = Vec::with_capacity(64);
+        e.wrap_rows(0, 8, &mut out);
+        let cap = out.capacity();
+        for _ in 0..5 {
+            e.wrap_rows(0, 8, &mut out);
+        }
+        assert_eq!(out.capacity(), cap);
+        assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn wrap_off_is_the_default_and_config_turns_it_on() {
+        let e = ed("text");
+        assert!(!e.wrap);
+        let cfg = Config {
+            word_wrap: true,
+            ..Config::default()
+        };
+        assert!(Editor::new(&cfg).wrap);
+    }
+
+    #[test]
+    fn wrap_width_has_a_floor_of_eight() {
+        let mut e = ed("x");
+        e.wrap_cols = 3;
+        assert_eq!(e.wrap_width(), 8);
+        e.wrap_cols = 40;
+        assert_eq!(e.wrap_width(), 40);
+    }
+
+    #[test]
+    fn wrapped_up_and_down_cross_rows_and_lines_keeping_the_column() {
+        // Rows of line 0 at width 8: "aaa bbb " (0), "ccc ddd " (8), "eee" (16). Line 1 starts at 20.
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        e.set_cursor(5, false); // column 5 of row 0
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 13, "column 5 of the second row");
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 19, "third row is 3 wide: clamped to its end");
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 22, "next line, row 0 is \"xy\": clamped to its end");
+        e.move_cursor(Move::Up, false);
+        assert_eq!(e.cursor, 19, "back to the third row, same clamp");
+        e.move_cursor(Move::Up, false);
+        assert_eq!(e.cursor, 13);
+        e.move_cursor(Move::Up, false);
+        assert_eq!(e.cursor, 5, "the column survived every clamp");
+        e.move_cursor(Move::Up, false);
+        assert_eq!(e.cursor, 0, "row 0 of the document: up goes to the start");
+        e.move_cursor(Move::Up, false);
+        assert_eq!(e.cursor, 0);
+    }
+
+    #[test]
+    fn wrapped_down_steps_one_row_each_then_stops_at_the_end() {
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        let mut seen = vec![e.cursor];
+        for _ in 0..3 {
+            e.move_cursor(Move::Down, false);
+            seen.push(e.cursor);
+        }
+        assert_eq!(seen, vec![0, 8, 16, 20]);
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 22);
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 22, "at the document end, down goes to the end");
+    }
+
+    #[test]
+    fn wrapped_page_moves_by_visual_rows() {
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        e.move_cursor(Move::PageDown(2), false);
+        assert_eq!(e.cursor, 16, "two rows down");
+        e.move_cursor(Move::PageDown(10), false);
+        assert_eq!(e.cursor, 20, "past the end clamps to the last row, column 0");
+        e.move_cursor(Move::PageUp(2), false);
+        assert_eq!(e.cursor, 8, "two rows up from line 1 row 0 is row 1 of line 0");
+        e.move_cursor(Move::PageUp(2), false);
+        assert_eq!(e.cursor, 0);
+    }
+
+    #[test]
+    fn wrapped_home_goes_to_row_start_then_line_start() {
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        e.set_cursor(13, false); // row 1
+        e.move_cursor(Move::LineHome, false);
+        assert_eq!(e.cursor, 8, "row start");
+        e.move_cursor(Move::LineHome, false);
+        assert_eq!(e.cursor, 0, "pressed again at the row start: logical line start");
+    }
+
+    #[test]
+    fn wrapped_home_on_first_row_is_smart() {
+        let mut e = wrapped("    word wrapped here", 8);
+        e.set_cursor(6, false);
+        e.move_cursor(Move::LineHome, false);
+        assert_eq!(e.cursor, 4, "first non-blank");
+        e.move_cursor(Move::LineHome, false);
+        assert_eq!(e.cursor, 0, "then column 0");
+        e.move_cursor(Move::LineHome, false);
+        assert_eq!(e.cursor, 4);
+    }
+
+    #[test]
+    fn wrapped_end_goes_to_row_end_and_draws_there() {
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        e.move_cursor(Move::LineEnd, false);
+        assert_eq!(e.cursor, 8, "end of the first row, after its trailing space");
+        assert_eq!(e.cursor_view_pos(), Some((0, 8)), "drawn at the end of row 0, not row 1");
+        // From row 1, End goes to the end of row 1; pressed again it stays there.
+        e.set_cursor(13, false);
+        e.move_cursor(Move::LineEnd, false);
+        assert_eq!(e.cursor, 16, "end of the second row");
+        assert_eq!(e.cursor_view_pos(), Some((1, 8)));
+        e.move_cursor(Move::LineEnd, false);
+        assert_eq!(e.cursor, 16, "already at the row end");
+        // The last row of the line ends at the newline.
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 19, "down keeps the column 8, clamped to the third row");
+        e.move_cursor(Move::LineEnd, false);
+        assert_eq!(e.cursor, 19);
+        assert_eq!(e.cursor_view_pos(), Some((2, 3)));
+    }
+
+    #[test]
+    fn wrapped_typing_after_end_appends_to_the_row() {
+        let mut e = wrapped("aaa bbb ccc", 8);
+        e.move_cursor(Move::LineEnd, false);
+        assert_eq!(e.cursor, 8);
+        e.insert_char('X');
+        assert_eq!(text(&e), "aaa bbb Xccc");
+        assert_eq!(e.cursor, 9);
+    }
+
+    #[test]
+    fn wrapped_movement_clears_the_end_flag() {
+        let mut e = wrapped("aaa bbb ccc ddd eee", 8);
+        e.move_cursor(Move::LineEnd, false);
+        e.move_cursor(Move::Left, false);
+        e.move_cursor(Move::Right, false);
+        assert_eq!(e.cursor, 8);
+        assert_eq!(e.cursor_view_pos(), Some((1, 0)), "a plain move shows the start of row 1");
+    }
+
+    #[test]
+    fn ensure_visible_wrapped_scrolls_to_a_cursor_below_the_view() {
+        // Ten rows of "abcdefgh " (9 bytes each), starting at 0, 9, ..., 81.
+        let text = "abcdefgh ".repeat(10);
+        let mut e = wrapped(&text, 8);
+        e.set_cursor(85, false);
+        e.ensure_cursor_visible(3, 80);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (0, 8), "cursor row sits one row above the bottom");
+        assert_eq!(e.cursor_view_pos(), Some((1, 4)));
+        assert_eq!(e.scroll_col, 0);
+        e.ensure_cursor_visible(3, 80);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (0, 8), "stable when visible");
+
+        e.set_cursor(0, false);
+        e.ensure_cursor_visible(3, 80);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (0, 0), "cursor above the view: top margin");
+    }
+
+    #[test]
+    fn ensure_visible_wrapped_handles_a_cursor_far_below_quickly() {
+        let text: String = (0..100_000).map(|i| format!("line {i} with words\n")).collect();
+        let mut e = ed(&text);
+        e.wrap = true;
+        e.wrap_cols = 40;
+        let last = e.buf.line_start(99_999);
+        e.set_cursor(last, false);
+        let t = std::time::Instant::now();
+        e.ensure_cursor_visible(30, 80);
+        let took = t.elapsed();
+        assert!(took.as_millis() < 500, "took {took:?}");
+        // One row per line here, so the top is 28 lines above the cursor (30 rows, bottom margin 1).
+        assert_eq!((e.scroll_line, e.scroll_subrow), (99_971, 0));
+        assert_eq!(e.cursor_view_pos(), Some((28, 0)));
+    }
+
+    #[test]
+    fn cursor_view_pos_is_none_above_the_view_and_far_below() {
+        let text: String = (0..20_000).map(|i| format!("{i}\n")).collect();
+        let mut e = ed(&text);
+        e.wrap = true;
+        e.wrap_cols = 40;
+        e.set_cursor(e.buf.line_start(19_000), false);
+        assert_eq!(e.cursor_view_pos(), None, "more than a screen below the top");
+        e.scroll_line = 18_990;
+        assert_eq!(e.cursor_view_pos(), Some((10, 0)));
+        e.scroll_line = 19_005;
+        assert_eq!(e.cursor_view_pos(), None, "above the top");
+    }
+
+    #[test]
+    fn pos_from_view_and_cursor_view_pos_round_trip() {
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        // Each char boundary, from the top of the view at each of the first three rows.
+        let boundaries: Vec<usize> = (0..=22)
+            .filter(|&p| p == 22 || e.buf.byte_at(p) & 0xC0 != 0x80)
+            .collect();
+        for top in 0..3 {
+            e.scroll_line = 0;
+            e.scroll_subrow = top;
+            for &pos in &boundaries {
+                e.set_cursor(pos, false);
+                let Some((row, col)) = e.cursor_view_pos() else {
+                    continue;
+                };
+                assert_eq!(e.pos_from_view(row, col, 100), pos, "top row {top}, pos {pos}");
+            }
+        }
+        e.scroll_subrow = 0;
+        e.set_cursor(16, false);
+        assert_eq!(e.cursor_view_pos(), Some((2, 0)));
+        assert_eq!(e.pos_from_view(2, 0, 100), 16);
+        // Past the end of a row: the position is the last char of that row.
+        assert_eq!(e.pos_from_view(0, 20, 100), 7);
+        // Below the last row: the last row of the document, at the requested column.
+        assert_eq!(e.pos_from_view(50, 0, 100), 20);
+        assert_eq!(e.pos_from_view(50, 1, 100), 21);
+    }
+
+    #[test]
+    fn pos_from_view_without_wrap_matches_visual_columns() {
+        let mut e = ed("abc\tdef\nxy");
+        for pos in [0usize, 1, 2, 4, 5, 7, 8] {
+            e.set_cursor(pos, false);
+            let (row, col) = e.cursor_view_pos().expect("visible");
+            assert_eq!(e.pos_from_view(row, col, 100), pos);
+        }
+        e.set_cursor(7, false);
+        assert_eq!(e.cursor_view_pos(), Some((0, 7)));
+        assert_eq!(e.pos_from_view(1, 1, 100), 9);
+        e.scroll_col = 4;
+        assert_eq!(e.cursor_view_pos(), Some((0, 3)), "column relative to the scroll");
+        e.set_cursor(0, false);
+        assert_eq!(e.cursor_view_pos(), None, "left of the horizontal scroll");
+    }
+
+    #[test]
+    fn scroll_by_steps_visual_rows_across_lines() {
+        // Rows: line 0 has three (0, 8, 16), line 1 one (20), line 2 one (23).
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy\nzz", 8);
+        e.scroll_by(2);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (0, 2));
+        e.scroll_by(2);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (2, 0), "crosses line 1 and lands on line 2");
+        e.scroll_by(-1);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (1, 0));
+        e.scroll_by(-5);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (0, 0), "clamps at the top");
+        e.scroll_by(100);
+        assert_eq!((e.scroll_line, e.scroll_subrow), (2, 0), "clamps at the last row");
+    }
+
+    #[test]
+    fn scroll_by_steps_logical_lines_without_wrap() {
+        let mut e = ed("a\nb\nc\nd");
+        e.scroll_by(2);
+        assert_eq!(e.scroll_line, 2);
+        assert_eq!(e.scroll_subrow, 0);
+    }
+
+    #[test]
+    fn toggling_wrap_off_keeps_the_nowrap_behaviour() {
+        let mut e = wrapped("aaa bbb ccc ddd eee\nxy", 8);
+        e.wrap = false;
+        e.set_cursor(5, false);
+        e.move_cursor(Move::Down, false);
+        assert_eq!(e.cursor, 22, "without wrap, Down goes to the next logical line, column 5 clamped");
+        assert_eq!(e.cursor_view_pos(), Some((1, 2)));
     }
 }

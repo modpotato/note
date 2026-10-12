@@ -19,7 +19,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 use super::{App, Layout, Prompt};
 use crate::buffer::Buffer;
 use crate::config::{Action, Config, Rgb};
-use crate::editor::Editor;
+use crate::editor::{wrap_rows_buf, Editor};
 use crate::syntax::{highlight_line, Lang, Span, Tok};
 
 /// Vertical offset of glyphs inside a row, in pixels.
@@ -70,6 +70,8 @@ pub(super) struct Renderer {
     pub(super) line_h: i32,
     bytes: Vec<u8>,
     spans: Vec<Span>,
+    /// Visual row starts of the line being painted (wrap mode).
+    rows: Vec<usize>,
     text: Vec<u16>,
     dx: Vec<i32>,
     runs: Vec<Run>,
@@ -120,6 +122,7 @@ impl Renderer {
             line_h: 16,
             bytes: Vec::new(),
             spans: Vec::new(),
+            rows: Vec::new(),
             text: Vec::new(),
             dx: Vec::new(),
             runs: Vec::new(),
@@ -220,14 +223,68 @@ impl Renderer {
         }
     }
 
-    /// Visible text: gutter, current-line tint, selection, syntax-coloured glyphs.
+    /// Expands `self.bytes[a..b]`, one visual row of the loaded line, into glyph cells.
+    /// Cell 0 is the row start, so tabs stop relative to it. Cells left of `scroll_col`
+    /// are skipped and expansion stops at cell `right`.
+    fn expand_row(&mut self, a: usize, b: usize, tw: usize, scroll_col: usize, right: usize, cw: i32) {
+        let mut cell = 0usize;
+        let mut last: Option<Tok> = None;
+        let mut si = self
+            .spans
+            .partition_point(|sp| (sp.start + sp.len) as usize <= a);
+        let mut i = a;
+        while i < b && cell < right {
+            while si < self.spans.len() && (self.spans[si].start + self.spans[si].len) as usize <= i {
+                si += 1;
+            }
+            let tok = match self.spans.get(si) {
+                Some(sp) if sp.start as usize <= i => sp.tok,
+                _ => Tok::Normal,
+            };
+            let byte = self.bytes[i];
+            if byte == b'\t' {
+                for _ in 0..(tw - cell % tw) {
+                    if cell >= right {
+                        break;
+                    }
+                    if cell >= scroll_col {
+                        self.push_char(' ', tok, cell, &mut last, cw);
+                    }
+                    cell += 1;
+                }
+                i += 1;
+                continue;
+            }
+            let len = utf8_len(byte).min(b - i);
+            let ch = std::str::from_utf8(&self.bytes[i..i + len])
+                .ok()
+                .and_then(|s| s.chars().next())
+                .unwrap_or('\u{FFFD}');
+            if cell >= scroll_col {
+                self.push_char(ch, tok, cell, &mut last, cw);
+            }
+            cell += 1;
+            i += len;
+        }
+    }
+
+    /// Visible text: gutter, current-line tint, selection, syntax-coloured glyphs. Walks
+    /// visual rows: one per logical line, or one per wrapped row in wrap mode. Continuation
+    /// rows show no line number but a "↪" in the gutter.
     fn draw_text(&mut self, ed: &mut Editor, cfg: &Config, lay: Layout) {
         let mem = self.mem;
         let theme = &cfg.theme;
         let tw = ed.tab_width.max(1);
         let (cw, lh, gutter) = (lay.cw, lay.lh, lay.gutter);
-        let scroll_line = ed.scroll_line;
-        let scroll_col = ed.scroll_col;
+        let wrap = ed.wrap;
+        // Wrapped text never scrolls sideways.
+        let scroll_col = if wrap { 0 } else { ed.scroll_col };
+        let width = ed.wrap_width();
+        let (mut line, mut sub) = if wrap {
+            ed.top_row(width)
+        } else {
+            (ed.scroll_line, 0)
+        };
         let cur = ed.cursor;
         let sel = ed.selection();
         let lang = ed.highlighter.lang();
@@ -242,29 +299,65 @@ impl Renderer {
         if gutter > 0 {
             fill(mem, rect(0, 0, gutter, lay.text_h), theme.gutter_bg);
         }
-        for row in 0..lay.rows {
-            let y = row as i32 * lh;
-            if y >= lay.text_h {
-                break;
+        // Row starts of `rows_line`, and the line whose bytes and spans are loaded.
+        let mut rows = std::mem::take(&mut self.rows);
+        let mut rows_line = usize::MAX;
+        let mut loaded = usize::MAX;
+        let mut y = 0i32;
+        while y < lay.text_h && line < line_count {
+            if rows_line != line {
+                if wrap {
+                    wrap_rows_buf(buf, tw, line, width, &mut rows);
+                } else {
+                    rows.clear();
+                    rows.push(buf.line_start(line));
+                }
+                rows_line = line;
             }
-            let line = scroll_line + row;
-            if line >= line_count {
-                break;
+            if sub >= rows.len() {
+                line += 1;
+                sub = 0;
+                continue;
             }
             let ls = buf.line_start(line);
             let le = buf.line_end(line);
+            let rs = rows[sub];
+            let last = sub + 1 >= rows.len();
+            let re = if last { le } else { rows[sub + 1] };
+
+            if loaded != line {
+                buf.slice_into(ls, le, &mut self.bytes);
+                let state = if use_syntax {
+                    highlighter.state_at(line, &mut |i: usize, out: &mut Vec<u8>| {
+                        buf.slice_into(buf.line_start(i), buf.line_end(i), out)
+                    })
+                } else {
+                    0
+                };
+                if use_syntax {
+                    highlight_line(lang, &self.bytes, state, &mut self.spans);
+                } else {
+                    self.spans.clear();
+                }
+                loaded = line;
+            }
 
             if cfg.highlight_current_line && line == cur_line {
                 fill(mem, rect(gutter, y, lay.w, y + lh), theme.current_line_bg);
             }
             if let Some((s, e)) = sel {
-                if s <= le && e > ls {
+                let hit = if last {
+                    s <= le && e > rs
+                } else {
+                    s < re && e > rs
+                };
+                if hit {
                     // A selected newline shows as one extra cell at the end of the line.
-                    let v0 = if s > ls { vcol(buf, ls, s, tw) } else { 0 };
-                    let v1 = if e > le {
-                        vcol(buf, ls, le, tw) + 1
+                    let v0 = if s > rs { vcol(buf, rs, s, tw) } else { 0 };
+                    let v1 = if last && e > le {
+                        vcol(buf, rs, le, tw) + 1
                     } else {
-                        vcol(buf, ls, e, tw)
+                        vcol(buf, rs, e.min(re), tw)
                     };
                     let x0 = (gutter + (v0 as i32 - scroll_col as i32) * cw).max(gutter);
                     let x1 = (gutter + (v1 as i32 - scroll_col as i32) * cw).min(lay.w);
@@ -272,65 +365,10 @@ impl Renderer {
                 }
             }
 
-            buf.slice_into(ls, le, &mut self.bytes);
-            let state = if use_syntax {
-                highlighter.state_at(line, &mut |i: usize, out: &mut Vec<u8>| {
-                    buf.slice_into(buf.line_start(i), buf.line_end(i), out)
-                })
-            } else {
-                0
-            };
-            if use_syntax {
-                highlight_line(lang, &self.bytes, state, &mut self.spans);
-            } else {
-                self.spans.clear();
-            }
-
-            // Expand the line into UTF-16 cells, skipping columns left of the view.
             self.text.clear();
             self.dx.clear();
             self.runs.clear();
-            let right = scroll_col + lay.cols;
-            let n = self.bytes.len();
-            let mut cell = 0usize;
-            let mut last: Option<Tok> = None;
-            let mut i = 0usize;
-            let mut si = 0usize;
-            while i < n && cell < right {
-                while si < self.spans.len()
-                    && (self.spans[si].start + self.spans[si].len) as usize <= i
-                {
-                    si += 1;
-                }
-                let tok = match self.spans.get(si) {
-                    Some(sp) if sp.start as usize <= i => sp.tok,
-                    _ => Tok::Normal,
-                };
-                let b = self.bytes[i];
-                if b == b'\t' {
-                    for _ in 0..(tw - cell % tw) {
-                        if cell >= right {
-                            break;
-                        }
-                        if cell >= scroll_col {
-                            self.push_char(' ', tok, cell, &mut last, cw);
-                        }
-                        cell += 1;
-                    }
-                    i += 1;
-                    continue;
-                }
-                let len = utf8_len(b).min(n - i);
-                let ch = std::str::from_utf8(&self.bytes[i..i + len])
-                    .ok()
-                    .and_then(|s| s.chars().next())
-                    .unwrap_or('\u{FFFD}');
-                if cell >= scroll_col {
-                    self.push_char(ch, tok, cell, &mut last, cw);
-                }
-                cell += 1;
-                i += len;
-            }
+            self.expand_row(rs - ls, re - ls, tw, scroll_col, scroll_col + lay.cols, cw);
 
             let clip = rect(gutter, y, lay.w, y + lh);
             for (k, &r) in self.runs.iter().enumerate() {
@@ -358,7 +396,9 @@ impl Renderer {
                 }
             }
 
-            if gutter > 0 {
+            if gutter > 0 && sub > 0 && wrap {
+                self.put(mem, gutter - 2 * cw, y + TEXT_DY, theme.gutter_fg, "\u{21AA}");
+            } else if gutter > 0 {
                 self.tmp.clear();
                 let _ = write!(self.tmp, "{}", line + 1);
                 self.tmp16.clear();
@@ -384,7 +424,11 @@ impl Renderer {
                     );
                 }
             }
+
+            y += lh;
+            sub += 1;
         }
+        self.rows = rows;
     }
 
     /// Status row: the prompt while one is open, else message/file name and position info.
@@ -592,17 +636,19 @@ pub(super) fn caret_spot(app: &App, lay: Layout) -> Option<(i32, i32)> {
         return Some((lay.cw + (labels + before) * lay.cw, lay.text_h));
     }
     let ed = &app.editor;
-    let (line, col) = ed.cursor_line_col();
-    if line < ed.scroll_line || line >= ed.scroll_line + lay.rows {
+    let (row, col) = ed.cursor_view_pos()?;
+    if row >= lay.rows {
         return None;
     }
-    if col < ed.scroll_col || col >= ed.scroll_col + lay.cols {
+    // A wrapped row can end in hanging spaces past the edge; the caret stops at the edge.
+    let col = if ed.wrap {
+        col.min(lay.cols)
+    } else if col < lay.cols {
+        col
+    } else {
         return None;
-    }
-    Some((
-        lay.gutter + (col - ed.scroll_col) as i32 * lay.cw,
-        (line - ed.scroll_line) as i32 * lay.lh,
-    ))
+    };
+    Some((lay.gutter + col as i32 * lay.cw, row as i32 * lay.lh))
 }
 
 /// Paints one frame into the back buffer and copies `clip` of it to `hdc`.
