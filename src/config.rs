@@ -119,7 +119,7 @@ impl Theme {
             gutter_fg: Rgb(0x6e, 0x6e, 0x78),
             status_bg: Rgb(0x2c, 0x2c, 0x35),
             status_fg: Rgb(0xcc, 0xcc, 0xcc),
-            hint_key_fg: Rgb(0xff, 0xff, 0xff),
+            hint_key_fg: Rgb(0x1b, 0x1b, 0x1f),
             hint_fg: Rgb(0x9d, 0x9d, 0xa6),
             tok: [
                 fg,                    // normal
@@ -149,7 +149,7 @@ impl Theme {
             gutter_fg: Rgb(0x8a, 0x8a, 0x94),
             status_bg: Rgb(0xe6, 0xe6, 0xec),
             status_fg: Rgb(0x1f, 0x1f, 0x1f),
-            hint_key_fg: Rgb(0x00, 0x00, 0x00),
+            hint_key_fg: Rgb(0xff, 0xff, 0xff),
             hint_fg: Rgb(0x55, 0x55, 0x5e),
             tok: [
                 fg,                    // normal
