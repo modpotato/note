@@ -135,6 +135,9 @@ jobs:
           fi
 
           {
+            printf '%s\n\n' '## Install'
+            printf -- '- **Setup (recommended):** `note-%s-setup-x86_64.exe`. Installs for your user account with no admin rights, and offers Start menu, Explorer and Open with entries.\n' "$TAG"
+            printf -- '- **Portable:** `note-%s-x86_64-windows.exe`. A single exe with no installation. Copy it anywhere and run it.\n\n' "$TAG"
             printf '%s\n\n' "$HEADER"
             count=0
             while IFS=$'\x1f' read -r full short author subject; do
@@ -211,11 +214,12 @@ jobs:
           if-no-files-found: error
 
   build:
-    name: Build Windows executable
+    name: Build Windows executable and installer
     needs: prepare
     runs-on: windows-latest
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -230,17 +234,45 @@ jobs:
           set -euo pipefail
           cargo build --release
 
-      - name: Name the executable and write SHA256SUMS
+      - name: Ensure makensis (NSIS) is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          if ($makensis) {
+            $makensisPath = $makensis.Source
+          } else {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install nsis failed with exit code $LASTEXITCODE" }
+            # Chocolatey does not update this session's PATH, so use the full path from here on.
+            $makensisPath = 'C:\Program Files (x86)\NSIS\makensis.exe'
+          }
+          if (-not (Test-Path -LiteralPath $makensisPath)) { throw "makensis not found at $makensisPath" }
+          # Later steps find makensis on PATH.
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path -Parent $makensisPath)
+          & $makensisPath -VERSION
+
+      - name: Name the executables, build the installer and write SHA256SUMS
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = "note-${env:TAG}-x86_64-windows.exe"
+          $setup = "note-${env:TAG}-setup-x86_64.exe"
           Copy-Item -LiteralPath 'target/release/note.exe' -Destination $exe
 
+          # -WX: a compiler warning fails the build. NSIS takes absolute paths for the exe and output.
+          $exeAbs = Join-Path $PWD 'target\release\note.exe'
+          $setupAbs = Join-Path $PWD $setup
+          makensis -WX -V3 "-DVERSION=$env:VERSION" "-DEXE=$exeAbs" "-DOUTFILE=$setupAbs" installer\note.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+
           # Same format as sha256sum: lowercase hex, two spaces, file name, LF, no BOM.
-          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $line = "$hash  $exe`n"
-          [System.IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), $line, [System.Text.UTF8Encoding]::new($false))
+          $lines = foreach ($file in @($exe, $setup)) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
+          $text = ($lines -join "`n") + "`n"
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), $text, [System.Text.UTF8Encoding]::new($false))
           Get-Content -LiteralPath 'SHA256SUMS.txt'
 
       - name: Upload Windows artifacts
@@ -249,6 +281,7 @@ jobs:
           name: windows-release
           path: |
             note-v*-x86_64-windows.exe
+            note-v*-setup-x86_64.exe
             SHA256SUMS.txt
           if-no-files-found: error
 
@@ -270,6 +303,7 @@ jobs:
         run: |
           set -euo pipefail
           exe="artifacts/windows-release/note-${TAG}-x86_64-windows.exe"
+          setup="artifacts/windows-release/note-${TAG}-setup-x86_64.exe"
           sums="artifacts/windows-release/SHA256SUMS.txt"
           notes="artifacts/release-notes/release-notes.md"
 
@@ -277,7 +311,7 @@ jobs:
           if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease); fi
           if [[ "$DRAFT" == "true" ]]; then args+=(--draft); fi
 
-          gh release create "$TAG" "$exe" "$sums" \
+          gh release create "$TAG" "$setup" "$exe" "$sums" \
             --repo "$GITHUB_REPOSITORY" \
             --title "note $TAG" \
             --notes-file "$notes" \

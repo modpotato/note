@@ -14,6 +14,28 @@ the C runtime linked statically.
 - **Small.** About 680 KB as a single exe with a static CRT and Paper Mono embedded (about
   470 KB without it). No runtime DLLs beyond the Windows system DLLs.
 
+## Install
+
+Each [release](https://github.com/modpotato/note/releases) has two Windows files:
+
+- **`note-vX.Y.Z-setup-x86_64.exe`** (recommended). A setup program that installs for your
+  own account, with no admin rights needed. By default it adds a Start menu entry, an
+  "Open with note" item in the Explorer right-click menu, and an "Open with" entry for text
+  and code files. Those "Open with" entries do not change your default programs. A desktop
+  shortcut and adding the install folder to PATH are off by default. Choose "Install for
+  anyone using this computer" to install for all users instead (this needs admin rights).
+- **`note-vX.Y.Z-x86_64-windows.exe`** (portable). A single exe. Nothing is installed or
+  registered, so copy it anywhere and run it.
+
+The setup program appears in Apps and Features and uninstalls cleanly: it removes
+everything it added. Your settings in `%APPDATA%\note` stay unless you choose to delete
+them. Setup asks Windows for the highest rights the account has, so an admin account sees a
+UAC prompt when setup starts. A standard account sees none.
+
+For scripted installs, run `setup.exe /S`. Add `/AllUsers` for all users (admin) or
+`/D=C:\path` for another folder. Uninstall silently with
+`"%LOCALAPPDATA%\Programs\note\uninstall.exe" /S`. The uninstaller keeps your settings.
+
 ## Build
 
 Windows with the MSVC toolchain:
@@ -29,8 +51,20 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-The exe is `target/<triple>/release/note.exe`. Prebuilt exes are attached to each GitHub
-release (see [Releasing](#releasing)).
+The exe is `target/<triple>/release/note.exe`. Prebuilt files are attached to each GitHub
+release (see [Releasing](#releasing)). The icon is `assets/icon/note.ico`, which
+`assets/icon/make-icon.sh` regenerates with ImageMagick. `build.rs` embeds it and a version
+resource into the Windows exe.
+
+To build the setup program, install NSIS 3 and run `makensis` on `installer/note.nsi`. The
+`-D` options are required, and `-WX` makes warnings fail the build:
+
+```
+makensis -WX -DVERSION=0.1.0 -DEXE=C:\full\path\to\note.exe -DOUTFILE=C:\full\path\to\note-v0.1.0-setup-x86_64.exe installer\note.nsi
+```
+
+On Linux, pass the same `-D` options with forward-slash paths, for example
+`target/x86_64-pc-windows-gnu/release/note.exe`.
 
 Run the tests with `cargo test`.
 
@@ -203,9 +237,11 @@ from the Actions tab, on the branch to release from.
 - `draft`: creates the release as a draft, to review before publishing.
 
 The workflow runs `cargo test --release`, sets `version` in `Cargo.toml`, and commits
-`Release vX.Y.Z` to the branch. It then creates an annotated tag, builds
-`note-vX.Y.Z-x86_64-windows.exe`, and publishes it with `SHA256SUMS.txt` and a changelog of
-the commits since the previous tag. If there is no tag yet, a patch release publishes the
+`Release vX.Y.Z` to the branch. It then creates an annotated tag, builds the portable exe
+`note-vX.Y.Z-x86_64-windows.exe` and the setup program `note-vX.Y.Z-setup-x86_64.exe`, and
+publishes both with `SHA256SUMS.txt` and a changelog of the commits since the previous tag.
+The release notes start with an Install section that names both files. If `makensis` is not
+on the Windows runner, the workflow installs NSIS with Chocolatey first. If there is no tag yet, a patch release publishes the
 version in `Cargo.toml` as it is, and a minor or major release bumps it.
 
 ## Known limitations
