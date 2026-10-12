@@ -28,8 +28,8 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-The exe is `target/<triple>/release/note.exe`. CI (`.github/workflows/build.yml`) runs the
-tests and uploads the exe as the `note-x86_64-windows` artifact.
+The exe is `target/<triple>/release/note.exe`. Prebuilt exes are attached to each GitHub
+release (see [Releasing](#releasing)).
 
 Run the tests with `cargo test`.
 
