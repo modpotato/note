@@ -1,0 +1,42 @@
+[package]
+name = "note"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-light, dark, configurable Win32 text editor with nano keybinds and SIMD internals"
+license = "MIT"
+
+[[bin]]
+name = "note"
+path = "src/main.rs"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_Shell",
+  "Win32_System_LibraryLoader",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_HiDpi",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
+
+[profile.dev]
+panic = "abort"

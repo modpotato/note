@@ -1,0 +1,1 @@
+//! STUB — see DESIGN.md
