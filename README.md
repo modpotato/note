@@ -154,6 +154,21 @@ cargo run --release --example bench -- <file>
 It reports the ASCII check, a plain copy for comparison, decode, line indexing, a byte count
 and a full lex pass.
 
+## Releasing
+
+Releases are cut by hand. Run the **Release** workflow (`.github/workflows/release.yml`)
+from the Actions tab, on the branch to release from.
+
+- `bump`: which part of the latest `vX.Y.Z` tag to increase: `patch`, `minor` or `major`.
+- `prerelease`: marks the GitHub release as a pre-release.
+- `draft`: creates the release as a draft, to review before publishing.
+
+The workflow runs `cargo test --release`, sets `version` in `Cargo.toml`, and commits
+`Release vX.Y.Z` to the branch. It then creates an annotated tag, builds
+`note-vX.Y.Z-x86_64-windows.exe`, and publishes it with `SHA256SUMS.txt` and a changelog of
+the commits since the previous tag. If there is no tag yet, a patch release publishes the
+version in `Cargo.toml` as it is, and a minor or major release bumps it.
+
 ## Known limitations
 
 - Soft wrap is not implemented yet. Long lines scroll horizontally.
