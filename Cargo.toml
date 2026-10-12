@@ -27,6 +27,7 @@ features = [
   "Win32_System_Ole",
   "Win32_Storage_FileSystem",
   "Win32_UI_HiDpi",
+  "Win32_UI_Controls",
 ]
 
 [profile.release]
