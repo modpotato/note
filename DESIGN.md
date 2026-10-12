@@ -228,7 +228,7 @@ pub struct Config {
     pub insert_spaces: bool,    // false
     pub line_numbers: bool,     // true
     pub word_wrap: bool,        // false
-    pub show_hints: bool,       // true (nano shortcut bar)
+    pub show_hints: bool,       // false (nano shortcut bar, Alt+X)
     pub highlight_current_line: bool, // true
     pub syntax: bool,           // true
     pub auto_indent: bool,      // true
@@ -253,7 +253,7 @@ tab_width = 4
 insert_spaces = false
 line_numbers = true
 word_wrap = false
-show_hints = true
+show_hints = false
 highlight_current_line = true
 syntax = true
 auto_indent = true

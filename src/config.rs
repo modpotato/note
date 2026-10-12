@@ -629,7 +629,7 @@ impl Default for Config {
             insert_spaces: false,
             line_numbers: true,
             word_wrap: false,
-            show_hints: true,
+            show_hints: false,
             highlight_current_line: true,
             syntax: true,
             auto_indent: true,
@@ -936,8 +936,8 @@ insert_spaces = false
 line_numbers = true
 ; Wrap long lines instead of scrolling sideways. Default: false
 word_wrap = false
-; Show the two-row nano shortcut bar. Default: true
-show_hints = true
+; Show the two-row nano shortcut bar. Default: false (Alt+X toggles)
+show_hints = false
 ; Subtle background behind the caret's line. Default: true
 highlight_current_line = true
 ; Syntax highlighting. Default: true
@@ -1396,7 +1396,7 @@ mod tests {
              font = Consolas\n\
              insert_spaces = yes\n\
              word_wrap = on\n\
-             show_hints = 0\n\
+             show_hints = 1\n\
              highlight_current_line = no\n\
              syntax = off\n\
              auto_indent = false\n\
@@ -1405,7 +1405,7 @@ mod tests {
         assert_eq!(cfg.font_faces, vec!["Consolas"]);
         assert!(cfg.insert_spaces);
         assert!(cfg.word_wrap);
-        assert!(!cfg.show_hints);
+        assert!(cfg.show_hints);
         assert!(!cfg.highlight_current_line);
         assert!(!cfg.syntax);
         assert!(!cfg.auto_indent);
