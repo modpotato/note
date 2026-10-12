@@ -42,6 +42,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
     GetMessageW, GetWindowLongPtrW, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage,
     RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    SystemParametersInfoW, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES,
     ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA,
     HTCLIENT, IDC_ARROW, IDC_IBEAM, IDI_APPLICATION, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
     WHEEL_DELTA, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
@@ -68,8 +69,9 @@ const MAX_PT: i32 = 72;
 const PATH_CHARS: usize = 32768;
 const WINDOW_CLASS: &str = "note.window";
 const DIALOG_FILTER: &str = "All Files\0*.*\0Text\0*.txt\0\0";
-/// Win32 MK_LBUTTON and MK_CONTROL key-state flags (WM_MOUSEMOVE / WM_MOUSEWHEEL wParam).
+/// Win32 MK_LBUTTON, MK_SHIFT and MK_CONTROL key-state flags (WM_MOUSEMOVE / WM_MOUSEWHEEL wParam).
 const MK_LBUTTON_FLAG: usize = 0x0001;
+const MK_SHIFT_FLAG: usize = 0x0004;
 const MK_CONTROL_FLAG: usize = 0x0008;
 /// Cells moved per horizontal wheel notch.
 const H_STEP: isize = 4;
@@ -359,6 +361,18 @@ fn point_of(lp: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
+/// Reads a u32 system setting (e.g. wheel scroll lines), or `default` if the call fails.
+fn system_param(action: u32, default: u32) -> u32 {
+    let mut v: u32 = default;
+    // SAFETY: the SPI_GETWHEELSCROLL* actions write one u32 through pvParam.
+    let ok = unsafe { SystemParametersInfoW(action, 0, (&mut v as *mut u32).cast(), 0) };
+    if ok == 0 {
+        default
+    } else {
+        v
+    }
+}
+
 /// Signed wheel delta from a wheel message's wParam.
 fn wheel_delta(wp: WPARAM) -> i32 {
     ((wp >> 16) & 0xFFFF) as u16 as i16 as i32
@@ -579,6 +593,7 @@ struct App {
     high_surrogate: u16,
     wheel_v: i32,
     wheel_h: i32,
+    wheel_z: i32,
     /// The pointer is inside the window, so WM_MOUSELEAVE has been requested.
     mouse_in: bool,
     /// Scrollbar the pointer is over, if any.
@@ -623,6 +638,7 @@ impl App {
             high_surrogate: 0,
             wheel_v: 0,
             wheel_h: 0,
+            wheel_z: 0,
             mouse_in: false,
             sb_hover: None,
             sb_drag: None,
@@ -1688,25 +1704,49 @@ impl App {
 
     fn on_wheel(&mut self, hwnd: HWND, wp: WPARAM) {
         let delta = wheel_delta(wp);
+        // Ctrl+wheel zooms, one step per full notch (precision touchpads send small deltas).
         if wp & MK_CONTROL_FLAG != 0 {
-            self.change_zoom(hwnd, if delta > 0 { 1 } else { -1 });
+            self.wheel_z += delta;
+            let notches = self.wheel_z / WHEEL_DELTA as i32;
+            self.wheel_z %= WHEEL_DELTA as i32;
+            if notches != 0 {
+                self.change_zoom(hwnd, notches);
+            }
+            return;
+        }
+        // Shift+wheel scrolls sideways, like most editors; wheel up = left.
+        if wp & MK_SHIFT_FLAG != 0 {
+            self.scroll_h_wheel(hwnd, -delta);
             return;
         }
         self.wheel_v += delta;
         let notches = self.wheel_v / WHEEL_DELTA as i32;
         self.wheel_v %= WHEEL_DELTA as i32;
         if notches != 0 {
-            self.editor.scroll_by(-(notches as isize) * V_WHEEL_LINES);
-            redraw(hwnd);
+            // Honour the user's "lines per notch" setting, including "one screen".
+            let per = match system_param(SPI_GETWHEELSCROLLLINES, V_WHEEL_LINES as u32) {
+                u32::MAX => self.layout().rows.max(1) as isize,
+                n => n as isize,
+            };
+            if per > 0 {
+                self.editor.scroll_by(-(notches as isize) * per);
+                redraw(hwnd);
+            }
         }
     }
 
     fn on_hwheel(&mut self, hwnd: HWND, wp: WPARAM) {
-        self.wheel_h += wheel_delta(wp);
+        self.scroll_h_wheel(hwnd, wheel_delta(wp));
+    }
+
+    /// Horizontal wheel motion; positive `delta` scrolls right.
+    fn scroll_h_wheel(&mut self, hwnd: HWND, delta: i32) {
+        self.wheel_h += delta;
         let notches = self.wheel_h / WHEEL_DELTA as i32;
         self.wheel_h %= WHEEL_DELTA as i32;
         if notches != 0 {
-            self.scroll_cols(notches as isize * H_STEP);
+            let per = system_param(SPI_GETWHEELSCROLLCHARS, H_STEP as u32) as isize;
+            self.scroll_cols(notches as isize * per);
             redraw(hwnd);
         }
     }
