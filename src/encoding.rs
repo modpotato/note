@@ -35,6 +35,29 @@ pub struct Decoded {
 /// Output text has CRLF normalised to LF.
 pub fn decode(bytes: &[u8]) -> Decoded {
     let (encoding, utf8) = decode_to_utf8(bytes);
+    finish(encoding, utf8)
+}
+
+/// Same result as `decode`, but takes ownership so the common cases (pure ASCII, UTF-8
+/// with or without a BOM, no '\r' to strip) reuse the allocation instead of copying a
+/// possibly very large file. Other cases fall back to `decode`'s conversion.
+pub fn decode_owned(mut bytes: Vec<u8>) -> Decoded {
+    match plain_utf8(&bytes) {
+        Some((encoding, start)) => {
+            if start > 0 {
+                bytes.drain(..start);
+            }
+            finish(encoding, bytes)
+        }
+        None => {
+            let (encoding, utf8) = decode_to_utf8(&bytes);
+            finish(encoding, utf8)
+        }
+    }
+}
+
+/// Line-ending detection and CRLF normalisation for text already in UTF-8.
+fn finish(encoding: Encoding, utf8: Vec<u8>) -> Decoded {
     let line_ending = detect_line_ending(&utf8);
     let text = if simd::find_byte(&utf8, b'\r').is_some() {
         simd::crlf_to_lf(&utf8)
@@ -118,16 +141,31 @@ impl LineEnding {
     }
 }
 
-/// Returns the encoding and the decoded UTF-8 bytes (line endings not yet normalised).
-fn decode_to_utf8(bytes: &[u8]) -> (Encoding, Vec<u8>) {
+/// Encodings whose body is already UTF-8: returns the encoding and the offset where the
+/// UTF-8 text starts (3 to skip a UTF-8 BOM). None for anything that needs conversion.
+fn plain_utf8(bytes: &[u8]) -> Option<(Encoding, usize)> {
     // Pure ASCII cannot start with a BOM, so this is the fastest common case.
     if simd::is_ascii(bytes) {
-        return (Encoding::Utf8, bytes.to_vec());
+        return Some((Encoding::Utf8, 0));
     }
     if let Some(body) = bytes.strip_prefix(UTF8_BOM) {
         if std::str::from_utf8(body).is_ok() {
-            return (Encoding::Utf8Bom, body.to_vec());
+            return Some((Encoding::Utf8Bom, UTF8_BOM.len()));
         }
+        return None;
+    }
+    if bytes.starts_with(UTF16_LE_BOM) || bytes.starts_with(UTF16_BE_BOM) {
+        return None;
+    }
+    std::str::from_utf8(bytes)
+        .is_ok()
+        .then_some((Encoding::Utf8, 0))
+}
+
+/// Returns the encoding and the decoded UTF-8 bytes (line endings not yet normalised).
+fn decode_to_utf8(bytes: &[u8]) -> (Encoding, Vec<u8>) {
+    if let Some((encoding, start)) = plain_utf8(bytes) {
+        return (encoding, bytes[start..].to_vec());
     }
     if let Some(body) = bytes.strip_prefix(UTF16_LE_BOM) {
         return (Encoding::Utf16Le, utf16_to_utf8(body, u16::from_le_bytes));
@@ -135,10 +173,7 @@ fn decode_to_utf8(bytes: &[u8]) -> (Encoding, Vec<u8>) {
     if let Some(body) = bytes.strip_prefix(UTF16_BE_BOM) {
         return (Encoding::Utf16Be, utf16_to_utf8(body, u16::from_be_bytes));
     }
-    match std::str::from_utf8(bytes) {
-        Ok(_) => (Encoding::Utf8, bytes.to_vec()),
-        Err(_) => (Encoding::Latin1, latin1_to_utf8(bytes)),
-    }
+    (Encoding::Latin1, latin1_to_utf8(bytes))
 }
 
 /// Decode UTF-16 code units (given by `from`) into UTF-8. Unpaired surrogates and a
@@ -349,6 +384,81 @@ mod tests {
         assert_eq!(decode(b"\nx").line_ending, LineEnding::Lf);
         // A bare '\r' is not a line break and is kept.
         assert_eq!(decode(b"a\rb").text, b"a\rb");
+    }
+
+    /// Every input the decode tests above exercise, plus a few plain/BOM/CR edge cases.
+    fn corpus() -> Vec<Vec<u8>> {
+        let mut v: Vec<Vec<u8>> = Vec::new();
+        for &enc in &ENCODINGS {
+            for &le in &ENDINGS {
+                v.push(encode(&sample_text(enc), enc, le));
+            }
+        }
+        let fixed: [&[u8]; 16] = [
+            b"",
+            b"\xEF\xBB\xBFhi\r\nthere",
+            b"\xEF\xBB\xBF",
+            b"\xEF\xBB\xBF\xE9x",
+            b"\xEF\xBB\xBF\xE9x\r\n",
+            b"\xFF\xFEa\x00\n\x00b\x00",
+            b"\xFE\xFF\x00a\x00\r\x00\n\x00b",
+            b"\xFF\xFE\x00\xD8a\x00",
+            b"\xFF\xFEa\x00b",
+            b"caf\xE9 \xFF\x80 end\nline2 \xC0\n",
+            b"caf\xE9\r\n\xFF\x80\r\n",
+            b"a\nb\r\n",
+            b"a\r\nb\n",
+            b"no newline",
+            b"a\rb",
+            b"\nx",
+        ];
+        v.extend(fixed.iter().map(|f| f.to_vec()));
+        // Pseudo-random mixes of bytes, as in `random_high_bytes_round_trip_byte_exact`.
+        let alphabet: &[u8] = b"ab\n\r\xEF\xBB\xBF\xC3\xA9\x80\xE9\xFD\xFE\xFF\x00";
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..300 {
+            let mut file = Vec::new();
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            for _ in 0..(state % 120) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                file.push(alphabet[(state % alphabet.len() as u64) as usize]);
+            }
+            v.push(file);
+        }
+        v
+    }
+
+    #[test]
+    fn decode_owned_matches_decode_on_all_inputs() {
+        for file in corpus() {
+            let expected = decode(&file);
+            let owned = decode_owned(file.clone());
+            assert_eq!(owned, expected, "file {file:?}");
+        }
+    }
+
+    #[test]
+    fn decode_owned_reuses_allocation_for_plain_utf8() {
+        let file = b"plain text\nno carriage returns\n".to_vec();
+        let ptr = file.as_ptr();
+        let d = decode_owned(file);
+        assert_eq!(d.text.as_ptr(), ptr, "ASCII is not copied");
+
+        let file = "caf\u{e9}\nunicode\n".as_bytes().to_vec();
+        let ptr = file.as_ptr();
+        let d = decode_owned(file);
+        assert_eq!(d.encoding, Encoding::Utf8);
+        assert_eq!(d.text.as_ptr(), ptr, "valid UTF-8 is not copied");
+
+        let mut file = b"\xEF\xBB\xBF".to_vec();
+        file.extend_from_slice("caf\u{e9}\n".as_bytes());
+        let d = decode_owned(file);
+        assert_eq!(d.encoding, Encoding::Utf8Bom);
+        assert_eq!(d.text, "caf\u{e9}\n".as_bytes());
     }
 
     #[test]

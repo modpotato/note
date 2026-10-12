@@ -54,7 +54,6 @@ use crate::config::{
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
 };
 use crate::editor::{Editor, Move};
-use crate::encoding;
 use crate::simd;
 use crate::syntax::Lang;
 use render::Renderer;
@@ -484,9 +483,9 @@ impl App {
         let mut editor = Editor::new(&config);
         if let Some(path) = file {
             match std::fs::read(&path) {
-                Ok(bytes) => editor.load(&path, &bytes),
+                Ok(bytes) => editor.load_owned(&path, bytes),
                 Err(e) if e.kind() == ErrorKind::NotFound => {
-                    editor.load(&path, &[]);
+                    editor.load_owned(&path, Vec::new());
                     editor.message = Some("New file".to_string());
                 }
                 Err(e) => editor.message = Some(format!("Cannot open {path}: {e}")),
@@ -1204,9 +1203,9 @@ impl App {
 
     fn load_path(&mut self, path: &str) {
         match std::fs::read(path) {
-            Ok(bytes) => self.editor.load(path, &bytes),
+            Ok(bytes) => self.editor.load_owned(path, bytes),
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                self.editor.load(path, &[]);
+                self.editor.load_owned(path, Vec::new());
                 self.editor.message = Some("New file".to_string());
             }
             Err(e) => self.editor.message = Some(format!("Error reading {path}: {e}")),
@@ -1231,11 +1230,11 @@ impl App {
     /// Encodes and writes the buffer. It is marked clean only after a successful write.
     fn write_to(&mut self, path: &str) -> bool {
         let e = &mut self.editor;
-        let bytes = encoding::encode(e.buf.make_contiguous(), e.encoding, e.line_ending);
+        let bytes = e.save_bytes();
         match std::fs::write(path, &bytes) {
             Ok(()) => {
-                let lines = e.buf.line_count();
-                e.buf.mark_clean();
+                let lines = e.buf.nano_line_count();
+                e.mark_saved();
                 e.path = Some(path.to_string());
                 e.highlighter.set_lang(Lang::from_path(path));
                 e.message = Some(format!("Wrote {lines} lines"));

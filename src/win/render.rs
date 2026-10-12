@@ -27,9 +27,10 @@ const TEXT_DY: i32 = 1;
 /// Cells per hint column; 6 columns per row fill the two hint rows.
 const HINT_CELLS: i32 = 18;
 const HINT_PER_ROW: usize = 6;
-/// Cells per help column, and where the action name starts inside a column.
+/// Cells per help column, and where the action name starts inside a column. The key box
+/// (" ^Backspace ", the widest default chord) is 12 cells, so the name starts after it.
 const HELP_CELLS: i32 = 34;
-const HELP_NAME_CELL: i32 = 12;
+const HELP_NAME_CELL: i32 = 14;
 const HELP_HEADER: &str = "Keys: Esc closes, arrows / PgUp / PgDn scroll";
 /// Hint bar entries, in display order.
 const HINTS: [(Action, &str); 12] = [
@@ -76,15 +77,14 @@ pub(super) struct Renderer {
     tmp16: Vec<u16>,
     /// Pre-rendered hint bar cells: (" key ", label).
     hints: Vec<(Vec<u16>, Vec<u16>)>,
-    /// Pre-rendered help overlay entries: (key, name).
+    /// Pre-rendered help overlay entries: (key box text, name). The key is empty when the
+    /// action has no binding.
     help: Vec<(Vec<u16>, Vec<u16>)>,
 }
 
-fn key_text(cfg: &Config, action: Action) -> String {
-    cfg.keymap
-        .chord_for(action)
-        .map(|c| c.display())
-        .unwrap_or_else(|| "-".to_string())
+/// The first chord bound to `action`, in nano notation, or None when it has no key.
+fn key_text(cfg: &Config, action: Action) -> Option<String> {
+    cfg.keymap.chord_for(action).map(|c| c.display())
 }
 
 fn to_utf16(s: &str) -> Vec<u16> {
@@ -98,17 +98,15 @@ impl Renderer {
         let hints = HINTS
             .iter()
             .map(|&(action, label)| {
-                let key = key_text(cfg, action);
+                let key = key_text(cfg, action).unwrap_or_else(|| "-".to_string());
                 (to_utf16(&format!(" {key} ")), to_utf16(label))
             })
             .collect();
         let help = Action::ALL
             .iter()
             .map(|&a| {
-                (
-                    to_utf16(&key_text(cfg, a)),
-                    to_utf16(&a.name().replace('_', " ")),
-                )
+                let key = key_text(cfg, a).map_or_else(Vec::new, |k| to_utf16(&format!(" {k} ")));
+                (key, to_utf16(&a.name().replace('_', " ")))
             })
             .collect();
         Renderer {
@@ -518,21 +516,27 @@ impl Renderer {
                     break;
                 };
                 let x = c as i32 * HELP_CELLS * lay.cw;
-                set_text_color(mem, theme.hint_key_fg);
-                // SAFETY: key and name are owned by self for the duration of the call.
-                unsafe {
-                    ExtTextOutW(
-                        mem,
-                        x + lay.cw,
-                        y + TEXT_DY,
-                        0,
-                        null(),
-                        key.as_ptr(),
-                        key.len() as u32,
-                        null(),
-                    );
+                if !key.is_empty() {
+                    // Same look as the hint bar: key text on a hint_fg box.
+                    let kw = key.len() as i32 * lay.cw;
+                    fill(mem, rect(x, y, x + kw, y + lay.lh), theme.hint_fg);
+                    set_text_color(mem, theme.hint_key_fg);
+                    // SAFETY: key is owned by self for the duration of the call.
+                    unsafe {
+                        ExtTextOutW(
+                            mem,
+                            x,
+                            y + TEXT_DY,
+                            0,
+                            null(),
+                            key.as_ptr(),
+                            key.len() as u32,
+                            null(),
+                        );
+                    }
                 }
                 set_text_color(mem, theme.fg);
+                // SAFETY: name is owned by self for the duration of the call.
                 unsafe {
                     ExtTextOutW(
                         mem,

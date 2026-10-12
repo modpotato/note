@@ -13,7 +13,7 @@ fn main() {
     let v = bytes.to_vec();
     println!("to_vec   {:?} {}", t.elapsed(), v.len());
     let t = Instant::now();
-    let dec = encoding::decode(&bytes);
+    let dec = encoding::decode_owned(bytes);
     let d_decode = t.elapsed();
     let t = Instant::now();
     let mut buf = Buffer::from_text(dec.text);

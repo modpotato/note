@@ -90,7 +90,13 @@ impl Editor {
     /// Replaces the document with the decoded `bytes`, sets the language from `path`
     /// and resets cursor, selection and scroll. The cut buffer and search text are kept.
     pub fn load(&mut self, path: &str, bytes: &[u8]) {
-        let d = encoding::decode(bytes);
+        self.load_owned(path, bytes.to_vec());
+    }
+
+    /// Same as `load`, but takes the file bytes by value so a large file is not copied
+    /// again while decoding.
+    pub fn load_owned(&mut self, path: &str, bytes: Vec<u8>) {
+        let d = encoding::decode_owned(bytes);
         self.buf = Buffer::from_text(d.text);
         self.buf.mark_clean();
         self.encoding = d.encoding;
@@ -107,11 +113,15 @@ impl Editor {
         self.message = None;
     }
 
-    /// Encodes the document with the current encoding and line ending, and marks it clean.
+    /// Encodes the document with the current encoding and line ending. The document stays
+    /// dirty until the caller has actually written the bytes and calls `mark_saved`.
     pub fn save_bytes(&mut self) -> Vec<u8> {
-        let out = encoding::encode(self.buf.make_contiguous(), self.encoding, self.line_ending);
+        encoding::encode(self.buf.make_contiguous(), self.encoding, self.line_ending)
+    }
+
+    /// Records that the current text has been written to disk.
+    pub fn mark_saved(&mut self) {
         self.buf.mark_clean();
-        out
     }
 
     /// `*` prefix when dirty, then the file name (no directories), or "Untitled", then " - note".
@@ -2154,6 +2164,7 @@ mod tests {
         e.insert_char('x');
         assert_eq!(e.title(), "*notes.txt - note");
         e.save_bytes();
+        e.mark_saved();
         assert_eq!(e.title(), "notes.txt - note");
         assert!(!e.is_dirty());
         e.undo();
@@ -2203,13 +2214,30 @@ mod tests {
     }
 
     #[test]
-    fn save_marks_clean_and_writes_current_text() {
+    fn save_bytes_does_not_mark_clean_until_mark_saved() {
         let mut e = ed("ab");
         e.set_cursor(2, false);
         type_str(&mut e, "c");
         let out = e.save_bytes();
         assert_eq!(out, b"abc".to_vec());
+        assert!(e.buf.is_dirty(), "a failed write must leave the buffer dirty");
+        assert_eq!(e.save_bytes(), b"abc".to_vec(), "encoding is repeatable");
+        e.mark_saved();
         assert!(!e.buf.is_dirty());
+    }
+
+    #[test]
+    fn load_owned_matches_load() {
+        let file = b"\xEF\xBB\xBFx\r\ny\r\n".to_vec();
+        let mut a = Editor::new(&Config::default());
+        a.load("t.txt", &file);
+        let mut b = Editor::new(&Config::default());
+        b.load_owned("t.txt", file);
+        assert_eq!(text(&a), text(&b));
+        assert_eq!(a.encoding, b.encoding);
+        assert_eq!(a.line_ending, b.line_ending);
+        assert_eq!(a.save_bytes(), b.save_bytes());
+        assert!(!b.buf.is_dirty());
     }
 
     // ----- misc invariants -------------------------------------------------

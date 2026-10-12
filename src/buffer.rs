@@ -138,6 +138,9 @@ impl Buffer {
         let mut line_starts = Vec::with_capacity(count_byte(&text, b'\n') + 1);
         line_starts.push(0);
         newline_positions(&text, 1, &mut line_starts);
+        // Grow the moved Vec in place (reserve_exact avoids the doubling `resize` would do
+        // on its own), so no copy of the text is made just to add the gap.
+        text.reserve_exact(MIN_GAP);
         text.resize(len + MIN_GAP, 0);
         Buffer {
             buf: text,
@@ -214,6 +217,18 @@ impl Buffer {
 
     pub fn line_count(&self) -> usize {
         self.line_starts.len()
+    }
+
+    /// Line count as nano reports it: the number of '\n' bytes, plus one more when the
+    /// text is non-empty and does not end with '\n'. Empty text has zero lines.
+    pub fn nano_line_count(&self) -> usize {
+        let len = self.len();
+        if len == 0 {
+            return 0;
+        }
+        let newlines = self.line_starts.len() - 1;
+        let unterminated = self.byte_at(len - 1) != b'\n';
+        newlines + usize::from(unterminated)
     }
 
     /// Start offset of `line` (clamped to the last line).
@@ -1010,5 +1025,17 @@ mod tests {
         assert_eq!(b.text(), b"xyz");
         assert_eq!(b.redo(), Some(3));
         assert_eq!(b.text(), b"yzQ");
+    }
+
+    #[test]
+    fn nano_line_count_matches_nano() {
+        let count = |t: &str| Buffer::from_text(t.as_bytes().to_vec()).nano_line_count();
+        assert_eq!(count(""), 0);
+        assert_eq!(count("a"), 1);
+        assert_eq!(count("a\n"), 1);
+        assert_eq!(count("\n"), 1);
+        assert_eq!(count("\n\n"), 2);
+        assert_eq!(count("a\nb"), 2);
+        assert_eq!(count("a\nb\n"), 2);
     }
 }
