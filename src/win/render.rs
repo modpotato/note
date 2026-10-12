@@ -291,7 +291,7 @@ impl Renderer {
 
     /// Visible text: gutter, current-line tint, selection, syntax-coloured glyphs. Walks
     /// visual rows: one per logical line, or one per wrapped row in wrap mode. Continuation
-    /// rows show no line number but a "↪" in the gutter.
+    /// rows show no line number but a "·" in the gutter.
     fn draw_text(&mut self, ed: &mut Editor, cfg: &Config, lay: Layout) {
         let mem = self.mem;
         let theme = &cfg.theme;
@@ -428,7 +428,7 @@ impl Renderer {
             }
 
             if gutter > 0 && sub > 0 && wrap {
-                self.put(mem, gutter - 2 * cw, y + self.text_dy, theme.gutter_fg, "\u{21AA}");
+                self.put(mem, gutter - 2 * cw, y + self.text_dy, theme.gutter_fg, "\u{00B7}");
             } else if gutter > 0 {
                 self.tmp.clear();
                 let _ = write!(self.tmp, "{}", line + 1);
