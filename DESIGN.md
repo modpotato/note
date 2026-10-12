@@ -218,8 +218,12 @@ impl Keymap {
 }
 
 pub struct Config {
-    pub font_face: String,      // "Cascadia Mono" (renderer falls back to "Consolas")
+    pub font_faces: Vec<String>,// preference list, ["Paper Mono"] (renderer then falls back to "Consolas")
     pub font_size: i32,         // points, 11
+    pub font_weight: i32,       // 100..=900, 400
+    pub bold_keywords: bool,    // keyword/type runs use a weight-700 face, false
+    pub line_height: f32,       // pitch = round(tmHeight * line_height), 1.0..=2.5, 1.2
+    pub font_smoothing: FontSmoothing, // ClearType | Grayscale | Off
     pub tab_width: usize,       // 4
     pub insert_spaces: bool,    // false
     pub line_numbers: bool,     // true
@@ -382,7 +386,8 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
 - Clipboard: CF_UNICODETEXT, convert LF <-> CRLF.
 - Rendering (render.rs): one memory DC + DIB section bitmap sized to client rect, recreated on WM_SIZE only.
-  Fonts: CreateFontW (ClearType, fixed pitch), regular only; char width from GetTextMetricsW (tmAveCharWidth) / GetTextExtentPoint32W("M").
+  Fonts: CreateFontW (fixed pitch), regular plus optional bold face; char width from GetTextExtentPoint32W("M").
+  `win/fonts.rs` registers the embedded Paper Mono faces with AddFontMemResourceEx at startup (feature `embed-font`).
   Paint only visible lines: for each line, slice_into scratch Vec<u8>, highlight via Highlighter::state_at +
   highlight_line, convert UTF-8 -> UTF-16 into reusable scratch Vec<u16> while expanding tabs, emit
   ExtTextOutW runs per span color (SetTextColor). Selection: fill rect behind selected columns. Caret: own
