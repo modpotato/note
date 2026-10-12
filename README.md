@@ -209,6 +209,7 @@ version in `Cargo.toml` as it is, and a minor or major release bumps it.
 
 ## Known limitations
 
-- Soft wrap is not implemented yet. Long lines scroll horizontally.
+- Soft wrap (`M-L`) breaks lines at word boundaries and is visual only. The vertical
+  scrollbar still counts logical lines.
 - CJK and other wide characters take one cell.
 - One document per window, by design. Open another copy of the app for another file.
