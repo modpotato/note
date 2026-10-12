@@ -1,6 +1,8 @@
 //! Win32 window layer: application state, window procedure, keyboard and mouse input,
 //! nano-style prompts, file I/O and the clipboard. Painting lives in `render`.
 
+#[cfg(feature = "embed-font")]
+mod fonts;
 mod render;
 
 use std::ffi::c_void;
@@ -136,6 +138,9 @@ pub fn run() {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    // Before any font is created, so the embedded faces can be matched.
+    #[cfg(feature = "embed-font")]
+    fonts::register();
     let config = load_config();
     let bg = config.theme.bg;
     let dark = luminance(bg.0, bg.1, bg.2) < 128;
@@ -528,7 +533,7 @@ impl App {
 
     fn apply_font(&mut self) {
         let pt = self.pt();
-        self.renderer.set_font(&self.config.font_face, pt, self.dpi);
+        self.renderer.set_font(&self.config, pt, self.dpi);
     }
 
     fn change_zoom(&mut self, hwnd: HWND, delta: i32) {

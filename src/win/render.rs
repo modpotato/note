@@ -10,20 +10,18 @@ use windows_sys::Win32::Foundation::{RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, DeleteDC, DeleteObject,
     ExtTextOutW, GetDC, GetStockObject, GetTextExtentPoint32W, GetTextFaceW, GetTextMetricsW,
-    ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, ETO_CLIPPED, ETO_OPAQUE, FF_MODERN, FIXED_PITCH,
-    FW_NORMAL, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY, SYSTEM_FONT, TEXTMETRICW,
-    TRANSPARENT,
+    ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, ETO_CLIPPED, ETO_OPAQUE, FF_MODERN,
+    FIXED_PITCH, FW_BOLD, HBITMAP, HDC, HFONT, HGDIOBJ, NONANTIALIASED_QUALITY,
+    OUT_DEFAULT_PRECIS, SRCCOPY, SYSTEM_FONT, TEXTMETRICW, TRANSPARENT,
 };
 
 use super::{App, Layout, Prompt};
 use crate::buffer::Buffer;
-use crate::config::{Action, Config, Rgb};
+use crate::config::{Action, Config, FontSmoothing, Rgb};
 use crate::editor::Editor;
 use crate::syntax::{highlight_line, Lang, Span, Tok};
 
-/// Vertical offset of glyphs inside a row, in pixels.
-const TEXT_DY: i32 = 1;
 /// Cells per hint column; 6 columns per row fill the two hint rows.
 const HINT_CELLS: i32 = 18;
 const HINT_PER_ROW: usize = 6;
@@ -65,9 +63,15 @@ pub(super) struct Renderer {
     default_bmp: HGDIOBJ,
     bmp_w: i32,
     bmp_h: i32,
+    /// Regular text face.
     font: HFONT,
+    /// Bold face for keywords and types, or null when `bold_keywords` is off.
+    bold: HFONT,
+    bold_keywords: bool,
     pub(super) char_w: i32,
     pub(super) line_h: i32,
+    /// Offset of the glyphs from the top of a row, centring them in `line_h`.
+    text_dy: i32,
     bytes: Vec<u8>,
     spans: Vec<Span>,
     text: Vec<u16>,
@@ -116,8 +120,11 @@ impl Renderer {
             bmp_w: 0,
             bmp_h: 0,
             font: null_mut(),
+            bold: null_mut(),
+            bold_keywords: false,
             char_w: 8,
             line_h: 16,
+            text_dy: 1,
             bytes: Vec::new(),
             spans: Vec::new(),
             text: Vec::new(),
@@ -155,22 +162,35 @@ impl Renderer {
         self.bmp_h = h;
     }
 
-    /// Sets the text font to `pt` points at `dpi` and re-measures the cell size.
-    pub(super) fn set_font(&mut self, face: &str, pt: i32, dpi: u32) {
+    /// Applies the font settings in `cfg` at `pt` points and `dpi`. Replaces the regular and
+    /// bold faces, then re-measures the cell size and the line pitch.
+    pub(super) fn set_font(&mut self, cfg: &Config, pt: i32, dpi: u32) {
         // Same rounding as MulDiv(pt, dpi, 72).
         let height = -((pt * dpi as i32 + 36) / 72);
-        // SAFETY: GDI objects are deselected before deletion; `mem` is ours.
+        let quality = match cfg.font_smoothing {
+            FontSmoothing::ClearType => CLEARTYPE_QUALITY as u32,
+            FontSmoothing::Grayscale => ANTIALIASED_QUALITY as u32,
+            FontSmoothing::Off => NONANTIALIASED_QUALITY as u32,
+        };
+        // SAFETY: every font is deselected before it is deleted; `mem` is ours.
         unsafe {
-            let (mut font, matched) = select_face(self.mem, height, face);
-            if !matched && !face.eq_ignore_ascii_case("Consolas") {
-                let (fallback, _) = select_face(self.mem, height, "Consolas");
-                DeleteObject(font);
-                font = fallback;
-            }
-            if !self.font.is_null() {
-                DeleteObject(self.font);
+            let font = choose_face(self.mem, height, &cfg.font_faces, cfg.font_weight, quality);
+            let bold = if cfg.bold_keywords {
+                choose_face(self.mem, height, &cfg.font_faces, FW_BOLD as i32, quality)
+            } else {
+                null_mut()
+            };
+
+            SelectObject(self.mem, GetStockObject(SYSTEM_FONT));
+            for old in [self.font, self.bold] {
+                if !old.is_null() {
+                    DeleteObject(old);
+                }
             }
             self.font = font;
+            self.bold = bold;
+            self.bold_keywords = cfg.bold_keywords;
+            SelectObject(self.mem, font);
 
             let mut tm: TEXTMETRICW = zeroed();
             GetTextMetricsW(self.mem, &mut tm);
@@ -178,7 +198,8 @@ impl Renderer {
             let m = [b'M' as u16];
             GetTextExtentPoint32W(self.mem, m.as_ptr(), 1, &mut sz);
             self.char_w = sz.cx.max(1);
-            self.line_h = (tm.tmHeight + 2).max(1);
+            self.line_h = ((tm.tmHeight as f32 * cfg.line_height).round() as i32).max(1);
+            self.text_dy = ((self.line_h - tm.tmHeight) / 2).max(0);
         }
     }
 
@@ -343,12 +364,16 @@ impl Renderer {
                 }
                 let x = gutter + (r.cell as i32 - scroll_col as i32) * cw;
                 set_text_color(mem, theme.tok[r.tok as usize]);
-                // SAFETY: the slices are in bounds and of equal length.
+                let bold_run =
+                    self.bold_keywords && matches!(r.tok, Tok::Keyword | Tok::Type);
+                // SAFETY: the slices are in bounds and of equal length. Each glyph still
+                // advances by its lpDx cell, so the bold face keeps the cell grid.
                 unsafe {
+                    SelectObject(mem, if bold_run { self.bold } else { self.font });
                     ExtTextOutW(
                         mem,
                         x,
-                        y + TEXT_DY,
+                        y + self.text_dy,
                         ETO_CLIPPED,
                         &clip,
                         self.text[r.start..end].as_ptr(),
@@ -356,6 +381,12 @@ impl Renderer {
                         self.dx[r.start..end].as_ptr(),
                     );
                 }
+            }
+            // The bold run may have left its face selected; the gutter and the later bars
+            // all use the regular face.
+            // SAFETY: self.font is a live font and `mem` is our DC.
+            unsafe {
+                SelectObject(mem, self.font);
             }
 
             if gutter > 0 {
@@ -375,7 +406,7 @@ impl Renderer {
                     ExtTextOutW(
                         mem,
                         x,
-                        y + TEXT_DY,
+                        y + self.text_dy,
                         0,
                         null(),
                         self.tmp16.as_ptr(),
@@ -402,9 +433,9 @@ impl Renderer {
         fill(mem, rect(0, y, lay.w, y + lay.lh), theme.status_bg);
 
         if let Some(p) = prompt {
-            self.put(mem, lay.cw, y + TEXT_DY, theme.status_fg, &p.label);
+            self.put(mem, lay.cw, y + self.text_dy, theme.status_fg, &p.label);
             let x = lay.cw + p.label.chars().count() as i32 * lay.cw;
-            self.put(mem, x, y + TEXT_DY, theme.status_fg, &p.text);
+            self.put(mem, x, y + self.text_dy, theme.status_fg, &p.text);
             return;
         }
 
@@ -426,7 +457,7 @@ impl Renderer {
         if ed.mark_mode {
             left.push_str("  [Mark Set]");
         }
-        self.put(mem, lay.cw, y + TEXT_DY, theme.status_fg, &left);
+        self.put(mem, lay.cw, y + self.text_dy, theme.status_fg, &left);
 
         left.clear();
         let (line, col) = ed.cursor_line_col();
@@ -444,7 +475,7 @@ impl Renderer {
         self.put(
             mem,
             (lay.w - (width + 1) * lay.cw).max(0),
-            y + TEXT_DY,
+            y + self.text_dy,
             theme.status_fg,
             &left,
         );
@@ -471,7 +502,7 @@ impl Renderer {
                 ExtTextOutW(
                     mem,
                     x,
-                    y + TEXT_DY,
+                    y + self.text_dy,
                     0,
                     null(),
                     key.as_ptr(),
@@ -484,7 +515,7 @@ impl Renderer {
                 ExtTextOutW(
                     mem,
                     x + kw + lay.cw,
-                    y + TEXT_DY,
+                    y + self.text_dy,
                     0,
                     null(),
                     label.as_ptr(),
@@ -500,7 +531,7 @@ impl Renderer {
         let mem = self.mem;
         let theme = &cfg.theme;
         fill(mem, rect(0, 0, lay.w, lay.text_h), theme.bg);
-        self.put(mem, lay.cw, TEXT_DY, theme.hint_fg, HELP_HEADER);
+        self.put(mem, lay.cw, self.text_dy, theme.hint_fg, HELP_HEADER);
 
         let body_rows = lay.rows.saturating_sub(1);
         let cols = (lay.w / (HELP_CELLS * lay.cw)).max(1) as usize;
@@ -526,7 +557,7 @@ impl Renderer {
                         ExtTextOutW(
                             mem,
                             x,
-                            y + TEXT_DY,
+                            y + self.text_dy,
                             0,
                             null(),
                             key.as_ptr(),
@@ -541,7 +572,7 @@ impl Renderer {
                     ExtTextOutW(
                         mem,
                         x + HELP_NAME_CELL * lay.cw,
-                        y + TEXT_DY,
+                        y + self.text_dy,
                         0,
                         null(),
                         name.as_ptr(),
@@ -562,8 +593,10 @@ impl Drop for Renderer {
                 return;
             }
             SelectObject(self.mem, GetStockObject(SYSTEM_FONT));
-            if !self.font.is_null() {
-                DeleteObject(self.font);
+            for font in [self.font, self.bold] {
+                if !font.is_null() {
+                    DeleteObject(font);
+                }
             }
             if !self.default_bmp.is_null() {
                 SelectObject(self.mem, self.default_bmp);
@@ -672,26 +705,33 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
     }
 }
 
-/// Creates the editor font named `face` at `height`, selects it into `dc`, and reports
-/// whether Windows used that face.
+/// Creates a fixed-pitch font named `face` at `height` and `weight`, and reports whether
+/// Windows used that face. The font is selected only while it is checked: on return the
+/// stock font is selected again, so the caller can delete the result.
 ///
 /// # Safety
 /// `dc` must be a valid memory DC.
-unsafe fn select_face(dc: HDC, height: i32, face: &str) -> (HFONT, bool) {
+unsafe fn make_font(
+    dc: HDC,
+    height: i32,
+    face: &str,
+    weight: i32,
+    quality: u32,
+) -> (HFONT, bool) {
     let name: Vec<u16> = face.encode_utf16().chain(std::iter::once(0)).collect();
     let font = CreateFontW(
         height,
         0,
         0,
         0,
-        FW_NORMAL as i32,
+        weight,
         0,
         0,
         0,
         DEFAULT_CHARSET as u32,
         OUT_DEFAULT_PRECIS as u32,
         CLIP_DEFAULT_PRECIS as u32,
-        CLEARTYPE_QUALITY as u32,
+        quality,
         (FIXED_PITCH | FF_MODERN) as u32,
         name.as_ptr(),
     );
@@ -701,7 +741,25 @@ unsafe fn select_face(dc: HDC, height: i32, face: &str) -> (HFONT, bool) {
     // GetTextFaceW counts the terminating NUL.
     let len = (n.max(1) - 1) as usize;
     let matched = String::from_utf16_lossy(&got[..len]).eq_ignore_ascii_case(face);
+    SelectObject(dc, GetStockObject(SYSTEM_FONT));
     (font, matched)
+}
+
+/// Returns the first face in `faces` that Windows actually matches, then Consolas, at
+/// `weight`. If Consolas does not match either, GDI's substitute is returned. The result is
+/// not selected into `dc`.
+///
+/// # Safety
+/// `dc` must be a valid memory DC.
+unsafe fn choose_face(dc: HDC, height: i32, faces: &[String], weight: i32, quality: u32) -> HFONT {
+    for face in faces.iter().map(String::as_str).chain(std::iter::once("Consolas")) {
+        let (font, matched) = make_font(dc, height, face, weight, quality);
+        if matched {
+            return font;
+        }
+        DeleteObject(font);
+    }
+    make_font(dc, height, "Consolas", weight, quality).0
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
