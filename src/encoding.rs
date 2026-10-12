@@ -169,14 +169,12 @@ fn latin1_to_utf8(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// CrLf if the first '\n' is preceded by '\r'; Lf otherwise; CrLf for an empty file.
+/// Lf only if the first '\n' is not preceded by '\r'; CrLf (the Windows default) otherwise,
+/// including files without any newline.
 fn detect_line_ending(text: &[u8]) -> LineEnding {
-    if text.is_empty() {
-        return LineEnding::CrLf;
-    }
     match simd::find_byte(text, b'\n') {
-        Some(i) if i > 0 && text[i - 1] == b'\r' => LineEnding::CrLf,
-        _ => LineEnding::Lf,
+        Some(i) if i == 0 || text[i - 1] != b'\r' => LineEnding::Lf,
+        _ => LineEnding::CrLf,
     }
 }
 
@@ -347,7 +345,7 @@ mod tests {
     fn line_ending_uses_first_newline() {
         assert_eq!(decode(b"a\nb\r\n").line_ending, LineEnding::Lf);
         assert_eq!(decode(b"a\r\nb\n").line_ending, LineEnding::CrLf);
-        assert_eq!(decode(b"no newline").line_ending, LineEnding::Lf);
+        assert_eq!(decode(b"no newline").line_ending, LineEnding::CrLf);
         assert_eq!(decode(b"\nx").line_ending, LineEnding::Lf);
         // A bare '\r' is not a line break and is kept.
         assert_eq!(decode(b"a\rb").text, b"a\rb");
