@@ -272,10 +272,17 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     if p.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
+    if msg == WM_DESTROY {
+        // Always end the message loop, however the window came to be destroyed.
+        PostQuitMessage(0);
+        return 0;
+    }
     let app = &mut *p;
     let res = handle(app, hwnd, msg, wp, lp);
-    if app.quit {
-        // Last use of `app`; DestroyWindow frees it through WM_NCDESTROY.
+    if app.quit && !app.destroying {
+        // DestroyWindow re-enters this procedure (focus, activation, WM_DESTROY, ...) and
+        // frees `app` in WM_NCDESTROY, so mark it first and never touch `app` afterwards.
+        app.destroying = true;
         DestroyWindow(hwnd);
         return 0;
     }
@@ -286,7 +293,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 fn handle(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     match msg {
         WM_CREATE => app.on_create(hwnd),
-        WM_DESTROY => unsafe { PostQuitMessage(0) },
         WM_CLOSE => app.request(hwnd, Pending::Exit),
         WM_ERASEBKGND => return Some(1),
         WM_PAINT => app.on_paint(hwnd),
@@ -604,6 +610,8 @@ struct App {
     dark: bool,
     /// Set when the window must be destroyed once the current message is done.
     quit: bool,
+    /// Set once DestroyWindow has been called, so re-entrant messages don't call it again.
+    destroying: bool,
 }
 
 impl App {
@@ -645,6 +653,7 @@ impl App {
             last_title: String::new(),
             dark,
             quit: false,
+            destroying: false,
         }
     }
 

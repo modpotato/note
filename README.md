@@ -1,8 +1,8 @@
 # note
 
 An ultra-light Notepad replacement for Windows. Pure Win32 and GDI, dark by default, nano
-key bindings, and no tabs, menus or frameworks. The release executable is about 450 KB, with
-the C runtime linked statically.
+key bindings, and no tabs, menus or frameworks. The release executable is about 730 KB (font,
+icon and C runtime included); the installer is about 460 KB.
 
 - **Pure Win32 / GDI.** One window, one document, a double-buffered GDI renderer that paints
   only the visible lines.
@@ -11,8 +11,8 @@ the C runtime linked statically.
 - **SIMD.** Byte scans (newline counting, search, line endings, ASCII checks) use SSE2 and
   AVX2, with AVX2 chosen at runtime.
 - **Syntax highlighting** for about 20 languages, computed incrementally.
-- **Small.** About 680 KB as a single exe with a static CRT and Paper Mono embedded (about
-  470 KB without it). No runtime DLLs beyond the Windows system DLLs.
+- **Small.** About 730 KB as a single exe with a static CRT, icon and Paper Mono embedded
+  (about 520 KB without the font). No runtime DLLs beyond the Windows system DLLs.
 
 ## Install
 
