@@ -1087,8 +1087,7 @@ fn comment_token(lang: Lang) -> Option<&'static str> {
         | Lang::JavaScript
         | Lang::TypeScript
         | Lang::Go
-        | Lang::Zig
-        | Lang::Css => "//",
+        | Lang::Zig => "//",
         Lang::Python | Lang::Shell | Lang::PowerShell | Lang::Toml => "#",
         Lang::Ini => ";",
         Lang::Lua | Lang::Sql => "--",
