@@ -16,7 +16,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS, SRCCOPY, SYSTEM_FONT, TEXTMETRICW, TRANSPARENT,
 };
 
-use super::{App, Layout, Prompt};
+use super::{App, Axis, Bars, Layout, Prompt};
 use crate::buffer::Buffer;
 use crate::config::{Action, Config, FontSmoothing, Rgb};
 use crate::editor::{wrap_rows_buf, Editor};
@@ -318,14 +318,14 @@ impl Renderer {
         let cur_line = buf.line_of(cur);
 
         if gutter > 0 {
-            fill(mem, rect(0, 0, gutter, lay.text_h), theme.gutter_bg);
+            fill(mem, rect(0, 0, gutter, lay.view_h), theme.gutter_bg);
         }
         // Row starts of `rows_line`, and the line whose bytes and spans are loaded.
         let mut rows = std::mem::take(&mut self.rows);
         let mut rows_line = usize::MAX;
         let mut loaded = usize::MAX;
         let mut y = 0i32;
-        while y < lay.text_h && line < line_count {
+        while y < lay.view_h && line < line_count {
             if rows_line != line {
                 if wrap {
                     wrap_rows_buf(buf, tw, line, width, &mut rows);
@@ -653,6 +653,41 @@ impl Drop for Renderer {
     }
 }
 
+/// Paints the custom scrollbars over the finished text, so the thumb is never hidden by a
+/// glyph. A bar the pointer is over, or that is being dragged, shows its track and takes the
+/// hover thumb colour.
+pub(super) fn paint_scrollbars(
+    dc: HDC,
+    cfg: &Config,
+    lay: Layout,
+    bars: Bars,
+    hover: Option<Axis>,
+    drag: Option<Axis>,
+) {
+    let theme = &cfg.theme;
+    if lay.hbar {
+        // The strip is opaque, so the bottom of a text row cut off by it does not show.
+        fill(dc, rect(0, lay.view_h, lay.w, lay.text_h), theme.bg);
+        fill(
+            dc,
+            rect(0, lay.view_h, lay.gutter, lay.text_h),
+            theme.gutter_bg,
+        );
+    }
+    for bar in [bars.v, bars.h].into_iter().flatten() {
+        let active = hover == Some(bar.axis) || drag == Some(bar.axis);
+        if active {
+            fill(dc, bar.track, theme.scrollbar_track);
+        }
+        let thumb = if active {
+            theme.scrollbar_thumb_hover
+        } else {
+            theme.scrollbar_thumb
+        };
+        fill(dc, bar.thumb, thumb);
+    }
+}
+
 /// Caret top-left in client pixels, or None when no caret is shown (help overlay, a
 /// confirmation prompt, or the cursor scrolled out of view). The prompt caret sits in the
 /// status row.
@@ -689,6 +724,9 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
     let lay = app.layout();
     let spot = caret_spot(app, lay);
     let zoom = app.zoom_pct();
+    let bars = app.scroll_bars(lay);
+    let hover = app.sb_hover;
+    let drag = app.sb_drag.map(|d| d.axis);
     let App {
         editor,
         config,
@@ -718,6 +756,7 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
     }
     fill(mem, rect(0, 0, lay.w, lay.h), config.theme.bg);
     renderer.draw_text(editor, config, lay);
+    paint_scrollbars(mem, config, lay, bars, hover, drag);
     renderer.draw_status(editor, config, lay, prompt.as_ref(), zoom);
     if config.show_hints {
         renderer.draw_hints(config, lay);
@@ -808,7 +847,7 @@ unsafe fn choose_face(dc: HDC, height: i32, faces: &[String], weight: i32, quali
     make_font(dc, height, "Consolas", weight, quality).0
 }
 
-fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+pub(super) fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
     RECT {
         left,
         top,

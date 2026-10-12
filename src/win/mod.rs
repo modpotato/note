@@ -12,10 +12,12 @@ use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 
 use windows_sys::core::{PCSTR, PCWSTR};
-use windows_sys::Win32::Foundation::{GlobalFree, FARPROC, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    GlobalFree, FARPROC, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, InvalidateRect, UpdateWindow, PAINTSTRUCT,
+    BeginPaint, EndPaint, InvalidateRect, ScreenToClient, UpdateWindow, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
@@ -27,28 +29,26 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows_sys::Win32::UI::Controls::{SetScrollInfo, SetWindowTheme, ShowScrollBar};
+use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_LWIN, VK_MENU, VK_RMENU, VK_RWIN,
-    VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    VK_CONTROL, VK_LWIN, VK_MENU, VK_RMENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetScrollInfo, GetWindowLongPtrW, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage,
-    RegisterClassExW, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA, IDC_IBEAM,
-    IDI_APPLICATION, MSG, SB_BOTTOM, SB_HORZ, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
-    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
-    SIF_TRACKPOS, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WHEEL_DELTA, WM_CHAR, WM_CLOSE, WM_CREATE,
-    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN, WM_KEYUP,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_HSCROLL,
-    WS_OVERLAPPEDWINDOW, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
+    GetMessageW, GetWindowLongPtrW, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage,
+    RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA,
+    HTCLIENT, IDC_ARROW, IDC_IBEAM, IDI_APPLICATION, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+    WHEEL_DELTA, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::config::{
@@ -58,7 +58,7 @@ use crate::config::{
 use crate::editor::{Editor, Move};
 use crate::simd;
 use crate::syntax::Lang;
-use render::Renderer;
+use render::{rect, Renderer};
 
 const TIMER_BLINK: usize = 1;
 const BLINK_MS: u32 = 530;
@@ -71,8 +71,13 @@ const DIALOG_FILTER: &str = "All Files\0*.*\0Text\0*.txt\0\0";
 /// Win32 MK_LBUTTON and MK_CONTROL key-state flags (WM_MOUSEMOVE / WM_MOUSEWHEEL wParam).
 const MK_LBUTTON_FLAG: usize = 0x0001;
 const MK_CONTROL_FLAG: usize = 0x0008;
-/// Cells moved per horizontal wheel notch or scrollbar arrow.
+/// Cells moved per horizontal wheel notch.
 const H_STEP: isize = 4;
+/// Custom scrollbars at 96 dpi: strip thickness, shortest thumb, and the gap between the
+/// thumb and the strip edges.
+const SB_THICK_PX: i32 = 10;
+const SB_MIN_THUMB_PX: i32 = 24;
+const SB_INSET_PX: i32 = 2;
 /// Lines moved per vertical wheel notch.
 const V_WHEEL_LINES: isize = 3;
 
@@ -111,7 +116,7 @@ fn enable_dark_app_mode() {
     }
 }
 
-/// Dark title bar, dark scrollbars and dark-mode allowance for one window.
+/// Dark title bar and dark-mode allowance for one window.
 fn enable_dark_window(hwnd: HWND) {
     // SAFETY: the attribute value is a 4-byte BOOL that outlives the call. Ordinal 133 is
     // AllowDarkModeForWindow(HWND, BOOL) returning BOOL.
@@ -127,8 +132,6 @@ fn enable_dark_window(hwnd: HWND) {
             let allow: unsafe extern "system" fn(HWND, i32) -> i32 = std::mem::transmute(f);
             allow(hwnd, 1);
         }
-        let theme = wide("DarkMode_Explorer");
-        SetWindowTheme(hwnd, theme.as_ptr(), null());
     }
 }
 
@@ -185,7 +188,7 @@ pub fn run() {
             WS_EX_ACCEPTFILES,
             class.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL,
+            WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -208,6 +211,23 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// `px` at 96 dpi, scaled to `dpi`, never below 1.
+fn scaled(px: i32, dpi: u32) -> i32 {
+    ((px as i64 * dpi as i64 + 48) / 96).max(1) as i32
+}
+
+/// Thumb length for a view of `visible` units in `total`, along a track of `track` pixels.
+/// Never below `min` (or the track itself, when that is shorter).
+fn bar_len(visible: usize, total: usize, track: i32, min: i32) -> i32 {
+    let len = (visible as u64 * track as u64 / total.max(1) as u64) as i32;
+    len.max(min.min(track)).min(track)
+}
+
+/// True when (x, y) is inside `r`, right and bottom edges excluded.
+fn inside(r: &RECT, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
 /// Perceptual brightness on 0..=255, as used for the dark-mode decision.
@@ -292,11 +312,17 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option
         WM_LBUTTONDOWN => app.on_mouse_down(hwnd, lp),
         WM_LBUTTONDBLCLK => app.on_double_click(hwnd, lp),
         WM_MOUSEMOVE => app.on_mouse_move(hwnd, lp, wp),
-        WM_LBUTTONUP => app.on_mouse_up(),
+        WM_LBUTTONUP => app.on_mouse_up(hwnd),
+        WM_MOUSELEAVE => app.on_mouse_leave(hwnd),
+        WM_SETCURSOR => {
+            // Only the client area is ours; borders and the caption keep their cursors.
+            if (lp & 0xFFFF) as u32 == HTCLIENT && app.on_set_cursor(hwnd) {
+                return Some(1);
+            }
+            return None;
+        }
         WM_MOUSEWHEEL => app.on_wheel(hwnd, wp),
         WM_MOUSEHWHEEL => app.on_hwheel(hwnd, wp),
-        WM_VSCROLL => app.on_scroll(hwnd, wp, SB_VERT),
-        WM_HSCROLL => app.on_scroll(hwnd, wp, SB_HORZ),
         WM_DROPFILES => app.on_drop(hwnd, wp as HDROP),
         _ => return None,
     }
@@ -345,14 +371,90 @@ struct Layout {
     h: i32,
     lh: i32,
     cw: i32,
-    /// Height of the text area, above the status row.
+    /// Height of the text area, above the status row. The horizontal scrollbar strip, when
+    /// shown, is its bottom `sb` pixels.
     text_h: i32,
+    /// Height of the rows that show text: `text_h`, less the horizontal scrollbar strip.
+    view_h: i32,
     /// Visible text rows (at least 1).
     rows: usize,
-    /// Visible columns right of the gutter (at least 1).
+    /// Visible columns right of the gutter (at least 1), not counting the vertical
+    /// scrollbar strip on the right edge.
     cols: usize,
     /// Gutter width in pixels, 0 when line numbers are off.
     gutter: i32,
+    /// Scrollbar thickness in pixels for this dpi.
+    sb: i32,
+    /// True when the horizontal scrollbar is shown (no wrap, and a line runs past the view).
+    hbar: bool,
+    /// Widest visible line in cells, measured only without wrap.
+    longest: usize,
+}
+
+/// Scrollbar axis. The vertical bar runs down the right edge of the text, the horizontal
+/// one along the bottom of the text, just above the status row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Axis {
+    Vert,
+    Horz,
+}
+
+/// Geometry of one custom scrollbar for this frame, in client pixels.
+#[derive(Clone, Copy)]
+struct Bar {
+    axis: Axis,
+    /// The whole strip. It is the hit area and the track painted on hover.
+    track: RECT,
+    /// The thumb, inset from the strip's edges.
+    thumb: RECT,
+    /// Along-axis pixel where the track starts, and where the thumb starts and how long
+    /// it is.
+    origin: i32,
+    start: i32,
+    len: i32,
+    /// Pixels the thumb can travel: track length less thumb length.
+    span: i32,
+    /// Largest scroll position the thumb maps to: a logical line, or a column.
+    max: usize,
+}
+
+impl Bar {
+    /// The pointer's coordinate along this bar's axis.
+    fn along(&self, x: i32, y: i32) -> i32 {
+        match self.axis {
+            Axis::Vert => y,
+            Axis::Horz => x,
+        }
+    }
+}
+
+/// The scrollbars for one frame. A bar is None when it is not shown.
+#[derive(Clone, Copy)]
+struct Bars {
+    v: Option<Bar>,
+    h: Option<Bar>,
+}
+
+impl Bars {
+    /// The shown bar whose strip contains the point.
+    fn hit(&self, x: i32, y: i32) -> Option<Bar> {
+        [self.v, self.h]
+            .into_iter()
+            .flatten()
+            .find(|b| inside(&b.track, x, y))
+    }
+}
+
+/// A thumb drag in progress. Positions are fixed when the drag starts, so the thumb keeps
+/// tracking the pointer even though the line widths behind the horizontal bar change.
+#[derive(Clone, Copy)]
+struct SbDrag {
+    axis: Axis,
+    /// Pointer offset from the thumb start when the button went down.
+    grab: i32,
+    origin: i32,
+    span: i32,
+    max: usize,
 }
 
 /// Command that waits for the unsaved-changes answer, or runs right away.
@@ -477,6 +579,12 @@ struct App {
     high_surrogate: u16,
     wheel_v: i32,
     wheel_h: i32,
+    /// The pointer is inside the window, so WM_MOUSELEAVE has been requested.
+    mouse_in: bool,
+    /// Scrollbar the pointer is over, if any.
+    sb_hover: Option<Axis>,
+    /// Thumb drag in progress.
+    sb_drag: Option<SbDrag>,
     last_title: String,
     dark: bool,
     /// Set when the window must be destroyed once the current message is done.
@@ -515,6 +623,9 @@ impl App {
             high_surrogate: 0,
             wheel_v: 0,
             wheel_h: 0,
+            mouse_in: false,
+            sb_hover: None,
+            sb_drag: None,
             last_title: String::new(),
             dark,
             quit: false,
@@ -544,31 +655,116 @@ impl App {
     }
 
     /// Current geometry. Rows and columns are at least 1 so scrolling math stays valid.
+    /// The vertical scrollbar always takes its strip from the columns, so the caret never
+    /// sits under it. The horizontal one takes the bottom row strip, but only when a line
+    /// runs past the view.
     fn layout(&self) -> Layout {
         let lh = self.renderer.line_h.max(1);
         let cw = self.renderer.char_w.max(1);
         let w = self.client_w.max(1);
         let h = self.client_h.max(1);
+        let sb = scaled(SB_THICK_PX, self.dpi);
         let hint_rows = if self.config.show_hints { 2 } else { 0 };
         let text_h = (h - (1 + hint_rows) * lh).max(0);
-        let rows = ((text_h / lh) as usize).max(1);
         let gutter = if self.config.line_numbers {
             let d = digits(self.editor.buf.line_count()).max(3) as i32;
             (d + 2) * cw
         } else {
             0
         };
-        let cols = ((w - gutter) / cw).max(1) as usize;
+        let cols = ((w - gutter - sb) / cw).max(1) as usize;
+        let rows_all = ((text_h / lh) as usize).max(1);
+        let longest = if self.editor.wrap {
+            0
+        } else {
+            self.editor.longest_visible(rows_all)
+        };
+        let hbar = !self.editor.wrap && (longest > cols || self.editor.scroll_col > 0);
+        let view_h = if hbar { (text_h - sb).max(0) } else { text_h };
+        let rows = ((view_h / lh) as usize).max(1);
         Layout {
             w,
             h,
             lh,
             cw,
             text_h,
+            view_h,
             rows,
             cols,
             gutter,
+            sb,
+            hbar,
+            longest,
         }
+    }
+
+    /// Geometry of both custom scrollbars for this frame. Nothing is shown while the help
+    /// overlay covers the text.
+    fn scroll_bars(&self, lay: Layout) -> Bars {
+        let mut bars = Bars { v: None, h: None };
+        if self.show_help {
+            return bars;
+        }
+        let ins = scaled(SB_INSET_PX, self.dpi);
+        let min_len = scaled(SB_MIN_THUMB_PX, self.dpi);
+        let ed = &self.editor;
+
+        let track_len = lay.view_h;
+        if track_len > 0 && ed.overflows_view(lay.rows) {
+            let lines = ed.buf.line_count();
+            // Total in logical lines: the last line can scroll to the top of the view.
+            let total = lines + lay.rows - 1;
+            let len = bar_len(lay.rows, total, track_len, min_len);
+            let max = lines - 1;
+            let span = track_len - len;
+            let start = (span as usize * ed.scroll_line.min(max))
+                .checked_div(max)
+                .unwrap_or(0) as i32;
+            let track = rect(lay.w - lay.sb, 0, lay.w, track_len);
+            bars.v = Some(Bar {
+                axis: Axis::Vert,
+                track,
+                thumb: rect(
+                    track.left + ins,
+                    start + ins,
+                    track.right - ins,
+                    start + len - ins,
+                ),
+                origin: 0,
+                start,
+                len,
+                span,
+                max,
+            });
+        }
+
+        let track_w = lay.w - lay.sb - lay.gutter;
+        if lay.hbar && track_w > 0 {
+            let track = rect(lay.gutter, lay.view_h, lay.w - lay.sb, lay.text_h);
+            // The content is at least as wide as the widest visible line, and at least as
+            // wide as the view scrolled to its current column.
+            let total = lay.longest.max(ed.scroll_col + lay.cols);
+            let max = (total - lay.cols).max(1);
+            let len = bar_len(lay.cols, total, track_w, min_len);
+            let span = track_w - len;
+            let start = track.left + (span as usize * ed.scroll_col / max) as i32;
+            bars.h = Some(Bar {
+                axis: Axis::Horz,
+                track,
+                thumb: rect(
+                    start + ins,
+                    track.top + ins,
+                    start + len - ins,
+                    track.bottom - ins,
+                ),
+                origin: track.left,
+                start,
+                len,
+                span,
+                max,
+            });
+        }
+        bars
     }
 
     // ----- window lifecycle --------------------------------------------------
@@ -585,9 +781,6 @@ impl App {
         self.apply_font();
         if self.dark {
             enable_dark_window(hwnd);
-        }
-        if self.editor.wrap {
-            show_hscroll(hwnd, false);
         }
         self.focused = true;
         self.sync_title(hwnd);
@@ -664,7 +857,7 @@ impl App {
         }
     }
 
-    /// Common tail of every command: keep the cursor visible, sync title and scrollbars,
+    /// Common tail of every command: keep the cursor visible, sync title,
     /// restart the caret blink and repaint.
     fn after_command(&mut self, hwnd: HWND) {
         let lay = self.layout();
@@ -674,7 +867,6 @@ impl App {
         self.sync_title(hwnd);
         self.caret_visible = true;
         self.start_blink(hwnd);
-        self.update_scrollbars(hwnd);
         redraw(hwnd);
     }
 
@@ -688,26 +880,6 @@ impl App {
             }
             self.last_title = title;
         }
-    }
-
-    fn update_scrollbars(&self, hwnd: HWND) {
-        let lay = self.layout();
-        let lines = self.editor.buf.line_count() as i32;
-        set_scroll(
-            hwnd,
-            SB_VERT,
-            lines - 1,
-            lay.rows as u32,
-            self.editor.scroll_line as i32,
-        );
-        let span = (self.editor.scroll_col + lay.cols * 2).max(256) as i32;
-        set_scroll(
-            hwnd,
-            SB_HORZ,
-            span - 1,
-            lay.cols as u32,
-            self.editor.scroll_col as i32,
-        );
     }
 
     // ----- keyboard ----------------------------------------------------------
@@ -1095,7 +1267,6 @@ impl App {
                 self.config.word_wrap = on;
                 self.editor.scroll_subrow = 0;
                 self.editor.scroll_col = 0;
-                show_hscroll(hwnd, !on);
                 self.editor.message = Some(if on {
                     "Soft wrap enabled"
                 } else {
@@ -1303,15 +1474,127 @@ impl App {
 
     /// True when a mouse point lands in the text area and the mouse is free to use.
     fn text_click_ok(&self, y: i32) -> bool {
-        !self.show_help && self.prompt.is_none() && y >= 0 && y < self.layout().text_h
+        !self.show_help && self.prompt.is_none() && y >= 0 && y < self.layout().view_h
+    }
+
+    /// True when a point lies in a scrollbar strip, shown or not. The strips are reserved
+    /// for the bars, so a click there never moves the caret or starts a selection.
+    fn in_bar_strip(lay: Layout, x: i32, y: i32) -> bool {
+        (x >= lay.w - lay.sb && y >= 0 && y < lay.view_h) || (y >= lay.view_h && y < lay.text_h)
+    }
+
+    /// Press in a bar strip. On the thumb it starts a drag. On the track it pages one
+    /// screen toward the click.
+    fn bar_press(&mut self, hwnd: HWND, lay: Layout, x: i32, y: i32) {
+        let Some(bar) = self.scroll_bars(lay).hit(x, y) else {
+            return;
+        };
+        let along = bar.along(x, y);
+        if along >= bar.start && along < bar.start + bar.len {
+            self.sb_drag = Some(SbDrag {
+                axis: bar.axis,
+                grab: along - bar.start,
+                origin: bar.origin,
+                span: bar.span,
+                max: bar.max,
+            });
+            self.sb_hover = Some(bar.axis);
+            // SAFETY: released in on_mouse_up once the drag ends.
+            unsafe {
+                SetCapture(hwnd);
+            }
+        } else {
+            let dir: isize = if along < bar.start { -1 } else { 1 };
+            match bar.axis {
+                Axis::Vert => self.editor.scroll_by(dir * lay.rows as isize),
+                Axis::Horz => self.scroll_cols(dir * lay.cols as isize),
+            }
+        }
+        redraw(hwnd);
+    }
+
+    /// Moves the view to follow a thumb drag. The pointer offset maps linearly onto the
+    /// scroll range.
+    fn bar_drag(&mut self, hwnd: HWND, lp: LPARAM) {
+        let Some(d) = self.sb_drag else {
+            return;
+        };
+        let (x, y) = point_of(lp);
+        let along = if d.axis == Axis::Vert { y } else { x };
+        let rel = (along - d.grab - d.origin).clamp(0, d.span) as usize;
+        let pos = if d.span > 0 {
+            rel * d.max / d.span as usize
+        } else {
+            0
+        };
+        match d.axis {
+            Axis::Vert => {
+                self.editor.scroll_line = pos;
+                self.editor.scroll_subrow = 0;
+            }
+            Axis::Horz => self.editor.scroll_col = pos,
+        }
+        redraw(hwnd);
+    }
+
+    /// Asks Windows for WM_MOUSELEAVE the first time the pointer is seen in the window.
+    fn track_mouse(&mut self, hwnd: HWND) {
+        if self.mouse_in {
+            return;
+        }
+        let mut tme = TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        // SAFETY: tme is fully initialised and lives for the call.
+        unsafe {
+            TrackMouseEvent(&mut tme);
+        }
+        self.mouse_in = true;
+    }
+
+    fn on_mouse_leave(&mut self, hwnd: HWND) {
+        self.mouse_in = false;
+        if self.sb_hover.take().is_some() {
+            redraw(hwnd);
+        }
+    }
+
+    /// Arrow over the bar strips, the I-beam (class cursor) over the text. Returns true when
+    /// the arrow was set.
+    fn on_set_cursor(&self, hwnd: HWND) -> bool {
+        if self.show_help {
+            return false;
+        }
+        let mut pt = POINT { x: 0, y: 0 };
+        // SAFETY: pt is a valid out-parameter; the window handle is the one being painted.
+        unsafe {
+            GetCursorPos(&mut pt);
+            ScreenToClient(hwnd, &mut pt);
+        }
+        if !Self::in_bar_strip(self.layout(), pt.x, pt.y) {
+            return false;
+        }
+        // SAFETY: IDC_ARROW is a system cursor, so no module handle is needed.
+        unsafe {
+            SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+        }
+        true
     }
 
     fn on_mouse_down(&mut self, hwnd: HWND, lp: LPARAM) {
         let (x, y) = point_of(lp);
+        let lay = self.layout();
+        if Self::in_bar_strip(lay, x, y) {
+            self.bar_press(hwnd, lay, x, y);
+            return;
+        }
         if !self.text_click_ok(y) {
             return;
         }
-        let pos = self.pos_at(self.layout(), x, y);
+        let pos = self.pos_at(lay, x, y);
         // SAFETY: plain state query.
         let shift = unsafe { GetKeyState(VK_SHIFT as i32) < 0 };
         self.editor.reset_cut_chain();
@@ -1325,29 +1608,46 @@ impl App {
     }
 
     fn on_mouse_move(&mut self, hwnd: HWND, lp: LPARAM, wp: WPARAM) {
-        if !self.drag {
-            return;
-        }
+        self.track_mouse(hwnd);
         if wp & MK_LBUTTON_FLAG == 0 {
-            self.on_mouse_up();
-            return;
+            // The button went up outside the window, or was never down: end any drag.
+            self.on_mouse_up(hwnd);
         }
         let (x, mut y) = point_of(lp);
         let lay = self.layout();
-        // Autoscroll while dragging above or below the text area.
+        if self.sb_drag.is_some() {
+            self.bar_drag(hwnd, lp);
+            return;
+        }
+        let hover = self.scroll_bars(lay).hit(x, y).map(|b| b.axis);
+        if hover != self.sb_hover {
+            self.sb_hover = hover;
+            redraw(hwnd);
+        }
+        if !self.drag {
+            return;
+        }
+        // Autoscroll while dragging above or below the text rows.
         if y < 0 {
             self.editor.scroll_by(-1);
             y = 0;
-        } else if y >= lay.text_h {
+        } else if y >= lay.view_h {
             self.editor.scroll_by(1);
-            y = lay.text_h - 1;
+            y = lay.view_h - 1;
         }
         let pos = self.pos_at(lay, x, y.max(0));
         self.editor.set_cursor(pos, true);
         self.after_command(hwnd);
     }
 
-    fn on_mouse_up(&mut self) {
+    fn on_mouse_up(&mut self, hwnd: HWND) {
+        if self.sb_drag.take().is_some() {
+            // SAFETY: the mouse was captured in bar_press.
+            unsafe {
+                ReleaseCapture();
+            }
+            redraw(hwnd);
+        }
         if self.drag {
             self.drag = false;
             // SAFETY: the mouse was captured in on_mouse_down.
@@ -1359,10 +1659,17 @@ impl App {
 
     fn on_double_click(&mut self, hwnd: HWND, lp: LPARAM) {
         let (x, y) = point_of(lp);
+        let lay = self.layout();
+        // The second press of a double click arrives as this message, so the bars page
+        // again on it, as a second click would.
+        if Self::in_bar_strip(lay, x, y) {
+            self.bar_press(hwnd, lay, x, y);
+            return;
+        }
         if !self.text_click_ok(y) {
             return;
         }
-        let pos = self.pos_at(self.layout(), x, y);
+        let pos = self.pos_at(lay, x, y);
         let buf = &self.editor.buf;
         let line = buf.line_of(pos);
         let (ls, le) = (buf.line_start(line), buf.line_end(line));
@@ -1390,7 +1697,6 @@ impl App {
         self.wheel_v %= WHEEL_DELTA as i32;
         if notches != 0 {
             self.editor.scroll_by(-(notches as isize) * V_WHEEL_LINES);
-            self.update_scrollbars(hwnd);
             redraw(hwnd);
         }
     }
@@ -1401,7 +1707,6 @@ impl App {
         self.wheel_h %= WHEEL_DELTA as i32;
         if notches != 0 {
             self.scroll_cols(notches as isize * H_STEP);
-            self.update_scrollbars(hwnd);
             redraw(hwnd);
         }
     }
@@ -1412,51 +1717,6 @@ impl App {
         }
         self.editor.scroll_col = (self.editor.scroll_col as isize + n).max(0) as usize;
     }
-
-    /// Scrollbar messages. Both bars share the same codes, so `bar` picks the axis.
-    fn on_scroll(&mut self, hwnd: HWND, wp: WPARAM, bar: i32) {
-        let code = (wp & 0xFFFF) as i32;
-        let lay = self.layout();
-        let vertical = bar == SB_VERT;
-        let page = (if vertical { lay.rows } else { lay.cols }) as isize;
-        let step: isize = if vertical { 1 } else { H_STEP };
-        let last = self.editor.buf.line_count() - 1;
-        match code {
-            SB_LINEUP => self.scroll_axis(vertical, -step),
-            SB_LINEDOWN => self.scroll_axis(vertical, step),
-            SB_PAGEUP => self.scroll_axis(vertical, -page),
-            SB_PAGEDOWN => self.scroll_axis(vertical, page),
-            SB_TOP if vertical => {
-                self.editor.scroll_line = 0;
-                self.editor.scroll_subrow = 0;
-            }
-            SB_TOP => self.editor.scroll_col = 0,
-            SB_BOTTOM if vertical => {
-                self.editor.scroll_line = last;
-                self.editor.scroll_subrow = 0;
-            }
-            SB_THUMBTRACK | SB_THUMBPOSITION => {
-                let pos = track_position(hwnd, bar);
-                if vertical {
-                    self.editor.scroll_line = pos.min(last);
-                    self.editor.scroll_subrow = 0;
-                } else {
-                    self.editor.scroll_col = pos;
-                }
-            }
-            _ => return,
-        }
-        self.update_scrollbars(hwnd);
-        redraw(hwnd);
-    }
-
-    fn scroll_axis(&mut self, vertical: bool, n: isize) {
-        if vertical {
-            self.editor.scroll_by(n);
-        } else {
-            self.scroll_cols(n);
-        }
-    }
 }
 
 /// Requests a repaint of the whole client area.
@@ -1464,42 +1724,6 @@ fn redraw(hwnd: HWND) {
     // SAFETY: a null rect invalidates the whole client area of a valid window.
     unsafe {
         InvalidateRect(hwnd, null(), 0);
-    }
-}
-
-/// Shows or hides the horizontal scrollbar. Soft wrap hides it, since lines never run wide.
-fn show_hscroll(hwnd: HWND, show: bool) {
-    // SAFETY: plain call on a valid window handle.
-    unsafe {
-        ShowScrollBar(hwnd, SB_HORZ, show as i32);
-    }
-}
-
-/// 32-bit thumb position of a scrollbar being dragged.
-fn track_position(hwnd: HWND, bar: i32) -> usize {
-    // SAFETY: SCROLLINFO is plain data; SIF_TRACKPOS asks for the 32-bit thumb position.
-    unsafe {
-        let mut si: SCROLLINFO = zeroed();
-        si.cbSize = size_of::<SCROLLINFO>() as u32;
-        si.fMask = SIF_TRACKPOS;
-        GetScrollInfo(hwnd, bar, &mut si);
-        si.nTrackPos.max(0) as usize
-    }
-}
-
-fn set_scroll(hwnd: HWND, bar: i32, max: i32, page: u32, pos: i32) {
-    let si = SCROLLINFO {
-        cbSize: size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-        nMin: 0,
-        nMax: max.max(0),
-        nPage: page,
-        nPos: pos,
-        nTrackPos: 0,
-    };
-    // SAFETY: si is fully initialised and lives for the call.
-    unsafe {
-        SetScrollInfo(hwnd, bar, &si, 1);
     }
 }
 

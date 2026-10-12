@@ -101,6 +101,11 @@ pub struct Theme {
     pub status_fg: Rgb,
     pub hint_key_fg: Rgb,
     pub hint_fg: Rgb,
+    /// Custom scrollbar thumb, and the thumb while the pointer is on the bar or dragging it.
+    pub scrollbar_thumb: Rgb,
+    pub scrollbar_thumb_hover: Rgb,
+    /// Scrollbar strip, painted only while the pointer is on the bar or dragging it.
+    pub scrollbar_track: Rgb,
     /// Indexed by `Tok as usize`. `tok[0] == fg` always.
     pub tok: [Rgb; TOK_COUNT],
 }
@@ -121,6 +126,9 @@ impl Theme {
             status_fg: Rgb(0xcc, 0xcc, 0xcc),
             hint_key_fg: Rgb(0x1b, 0x1b, 0x1f),
             hint_fg: Rgb(0x9d, 0x9d, 0xa6),
+            scrollbar_thumb: Rgb(0x3a, 0x3a, 0x42),
+            scrollbar_thumb_hover: Rgb(0x55, 0x55, 0x5f),
+            scrollbar_track: Rgb(0x1f, 0x1f, 0x24),
             tok: [
                 fg,                    // normal
                 Rgb(0x56, 0x9c, 0xd6), // keyword
@@ -151,6 +159,9 @@ impl Theme {
             status_fg: Rgb(0x1f, 0x1f, 0x1f),
             hint_key_fg: Rgb(0xff, 0xff, 0xff),
             hint_fg: Rgb(0x55, 0x55, 0x5e),
+            scrollbar_thumb: Rgb(0xc4, 0xc4, 0xc8),
+            scrollbar_thumb_hover: Rgb(0xa0, 0xa0, 0xa8),
+            scrollbar_track: Rgb(0xec, 0xec, 0xee),
             tok: [
                 fg,                    // normal
                 Rgb(0x00, 0x00, 0xff), // keyword
@@ -180,6 +191,9 @@ impl Theme {
             ("status_fg", self.status_fg),
             ("hint_key_fg", self.hint_key_fg),
             ("hint_fg", self.hint_fg),
+            ("scrollbar_thumb", self.scrollbar_thumb),
+            ("scrollbar_thumb_hover", self.scrollbar_thumb_hover),
+            ("scrollbar_track", self.scrollbar_track),
         ];
         v.extend(TOKEN_NAMES.iter().copied().zip(self.tok.iter().copied()));
         v
@@ -202,6 +216,9 @@ impl Theme {
             "status_fg" => self.status_fg = c,
             "hint_key_fg" => self.hint_key_fg = c,
             "hint_fg" => self.hint_fg = c,
+            "scrollbar_thumb" => self.scrollbar_thumb = c,
+            "scrollbar_thumb_hover" => self.scrollbar_thumb_hover = c,
+            "scrollbar_track" => self.scrollbar_track = c,
             other => match TOKEN_NAMES.iter().position(|&n| n == other) {
                 Some(i) => self.tok[i] = c,
                 None => return false,

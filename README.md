@@ -130,7 +130,8 @@ ctrl+s = save          ; add or move a binding
 Chords can be written in nano notation (`^S-Z`) or by name (`ctrl+shift+z`, `alt+up`,
 `f3`). Colour keys are the theme names: `bg`, `fg`, `caret`, `selection_bg`,
 `current_line_bg`, `gutter_bg`, `gutter_fg`, `status_bg`, `status_fg`, `hint_key_fg`,
-`hint_fg`, and the token colours `keyword`, `type`, `string`, `number`, `comment`,
+`hint_fg`, the scrollbar colours `scrollbar_thumb`, `scrollbar_thumb_hover` and
+`scrollbar_track`, and the token colours `keyword`, `type`, `string`, `number`, `comment`,
 `preproc`, `function`, `punct`, `heading`.
 
 Font keys in `[editor]`:

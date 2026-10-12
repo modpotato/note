@@ -955,6 +955,41 @@ impl Editor {
             .clamp(0, max) as usize;
     }
 
+    /// Widest of the `rows` logical lines from the view top, in cells. Only the lines on
+    /// screen are measured, so the cost follows the view, not the file. Used without wrap.
+    pub fn longest_visible(&self, rows: usize) -> usize {
+        let count = self.buf.line_count();
+        let first = self.scroll_line.min(count - 1);
+        let end = first.saturating_add(rows).min(count);
+        let tw = self.tw();
+        (first..end)
+            .map(|line| {
+                let ls = self.buf.line_start(line);
+                let le = self.buf.line_end(line);
+                cell_offset(le - ls, tw, |i| self.buf.byte_at(ls + i))
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// True when the text does not fit in `rows` visible rows, or the view is scrolled
+    /// away from the top, so a vertical scrollbar has something to show. In wrap mode the
+    /// check walks only as far as the view, never the whole file.
+    pub fn overflows_view(&self, rows: usize) -> bool {
+        let rows = rows.max(1);
+        if !self.wrap {
+            return self.scroll_line > 0 || self.buf.line_count() > rows;
+        }
+        let w = self.wrap_width();
+        if self.top_row(w) != (0, 0) {
+            return true;
+        }
+        let last = self.buf.line_count() - 1;
+        let mut starts = Vec::new();
+        self.wrap_rows(last, w, &mut starts);
+        self.vrow_fwd(0, 0, rows - 1, w) != (last, starts.len() - 1)
+    }
+
     // ----- soft wrap -----------------------------------------------------------
     //
     // A visual row is a (logical line, sub) pair; `sub` indexes `wrap_rows(line)`. Every
@@ -2677,6 +2712,53 @@ mod tests {
         e.delete_forward();
         e.backspace();
         assert_eq!(text(&e), "");
+    }
+
+    // ----- scrollbar helpers ----------------------------------------------
+
+    #[test]
+    fn overflow_is_false_when_everything_fits_at_the_top() {
+        let e = ed("a\nb\nc");
+        assert!(!e.overflows_view(3));
+        assert!(!e.overflows_view(10));
+        assert!(e.overflows_view(2));
+    }
+
+    #[test]
+    fn overflow_stays_true_once_scrolled_even_if_lines_fit() {
+        let mut e = ed("a\nb\nc");
+        e.scroll_line = 1;
+        assert!(e.overflows_view(10));
+    }
+
+    #[test]
+    fn wrapped_overflow_counts_visual_rows() {
+        // "abcdefgh" at width 8 is one row; "abcdefghi" wraps to two.
+        let one = wrapped("abcdefgh", 8);
+        assert!(!one.overflows_view(1));
+        let two = wrapped("abcdefghi\n", 8);
+        assert!(!two.overflows_view(3));
+        assert!(two.overflows_view(2));
+        let many = wrapped(&"word ".repeat(200), 20);
+        assert!(many.overflows_view(5));
+        assert!(!many.overflows_view(500));
+    }
+
+    #[test]
+    fn longest_visible_measures_only_the_view() {
+        let mut e = ed("ab\nabcdef\nx\nlonger line here");
+        assert_eq!(e.longest_visible(2), 6);
+        assert_eq!(e.longest_visible(4), 16);
+        e.scroll_line = 2;
+        assert_eq!(e.longest_visible(1), 1);
+        e.scroll_line = 3;
+        assert_eq!(e.longest_visible(9), 16);
+    }
+
+    #[test]
+    fn longest_visible_expands_tabs() {
+        let e = ed("\tx");
+        assert_eq!(e.longest_visible(1), 5);
     }
 
     // ----- soft wrap -----------------------------------------------------

@@ -379,7 +379,9 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   WM_CHAR inserts printable chars (>= 0x20, excluding when Ctrl is down unless AltGr i.e. ctrl+alt);
   handle UTF-16 surrogate pairs. WM_SYSCHAR swallowed when we handled alt combo (avoid beep).
   Mouse: click positions caret, shift+click extends, drag selects (SetCapture), double-click selects word,
-  wheel scrolls 3 lines (ctrl+wheel zooms).
+  wheel scrolls 3 lines (ctrl+wheel zooms). Scrollbars are custom-painted (no WS_VSCROLL): a vertical
+  strip on the text's right edge and a horizontal one above the status row (only without wrap, when a
+  visible line runs past the view). Hit-tested before the text in mouse messages; WM_SETCURSOR shows an arrow over them.
 - Prompt bar (nano style): find / replace / goto / save-as-confirm prompts typed into the status line
   area — a tiny inline single-line input owned by App (no EDIT control): Enter confirms, Esc cancels.
   Exit / open with unsaved changes -> nano-style prompt "Save modified buffer? (Y/N/^C)".
