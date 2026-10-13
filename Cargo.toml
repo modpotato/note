@@ -1,6 +1,6 @@
 [package]
 name = "note"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Ultra-light, dark, configurable Win32 text editor with nano keybinds and SIMD internals"
 license = "MIT"
