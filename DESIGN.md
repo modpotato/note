@@ -1,12 +1,17 @@
 # note — architecture & module contracts
 
-Ultra-light Win32 text editor. Pure Win32 + GDI, no frameworks, no menu bar.
-One window with tabs: optional tab strip (shown with two or more tabs by default), text area,
-1-line status bar, (toggleable) 2-line shortcut hint bar.
-Dark by default, configurable via `%APPDATA%\note\note.ini`. Windows Notepad keys by default, plus
-a few line-editing extras (ctrl+k cut line, ctrl+d duplicate, alt+up/down move line).
+This is the map of how note fits together: what each module promises, and why. If you're
+about to change one, read its section first.
 
-Crate layout (library + thin binary so everything but `win/` is unit-testable on Linux):
+note is an ultra-light Win32 text editor: pure Win32 + GDI, no frameworks, no menu bar. One
+window holds, top to bottom, an optional tab strip (by default it appears once two tabs are
+open), the text area, a one-line status bar, and a two-line shortcut hint bar you can toggle.
+It's dark by default and configured through `%APPDATA%\note\note.ini`. The default keys are
+Windows Notepad's, plus a few line-editing extras (ctrl+k cuts the line, ctrl+d duplicates
+it, alt+up/down moves it).
+
+The crate is a library plus a thin binary, so everything except `win/` can be unit-tested on
+Linux:
 
 ```
 src/main.rs      #![windows_subsystem = "windows"]; on windows calls note::win::run(); else prints a message
@@ -25,10 +30,10 @@ src/win/find.rs  Find/Replace dialog (in-memory template), live preview, regex c
 src/win/render.rs GDI double-buffered painting
 ```
 
-Rules for ALL modules:
-- No external crates except `windows-sys` (only in `src/win/`). std only.
-- No `unwrap()` on user/file data paths; never panic on bad input.
-- Hot paths must avoid allocation per frame / per keystroke where reasonable.
+Rules for every module:
+- No external crates except `windows-sys`, and only in `src/win/`. Everything else is std.
+- No `unwrap()` on paths that touch user or file data. Bad input never panics.
+- Hot paths avoid allocating per frame or per keystroke wherever that's reasonable.
 - `cargo test` (Linux host) must pass; `cargo check --target x86_64-pc-windows-gnu` must pass.
 - Every module has `#[cfg(test)] mod tests` with meaningful tests.
 
@@ -55,12 +60,15 @@ pub fn lf_to_crlf(src: &[u8]) -> Vec<u8>;
 /// true if all bytes < 0x80.
 pub fn is_ascii(src: &[u8]) -> bool;
 ```
-Implementation: x86_64 uses `core::arch::x86_64`. SSE2 is baseline on x86_64 (always available).
-AVX2 path chosen at runtime via `is_x86_feature_detected!("avx2")`, cached in a `static AtomicU8`.
-`#[target_feature(enable = "avx2")] unsafe fn ..._avx2`. Substring search: first+last byte
-SIMD filter (the "generic SIMD" / memchr-style algorithm) then memcmp verify. Non-x86 targets: scalar fallback.
-Tests must compare every function against a naive scalar implementation on many random-ish
-inputs (use a simple xorshift PRNG, no rand crate) across lengths 0..300 and unaligned offsets.
+On x86_64 the kernels use `core::arch::x86_64`. SSE2 is the baseline there, since every
+x86_64 CPU has it. The AVX2 path is picked at runtime with `is_x86_feature_detected!("avx2")`,
+and the answer is cached in a `static AtomicU8`; those functions are
+`#[target_feature(enable = "avx2")] unsafe fn ..._avx2`. Substring search filters candidates
+on the needle's first and last byte with SIMD (the "generic SIMD", memchr-style algorithm),
+then confirms each with a memcmp. Other targets get a scalar fallback.
+
+Tests compare every function against a naive scalar version on lots of random-ish inputs
+(a simple xorshift PRNG, no rand crate), across lengths 0..300 and unaligned offsets.
 
 ---------------------------------------------------------------------------
 ## encoding.rs
@@ -87,7 +95,8 @@ impl LineEnding { pub fn name(self) -> &'static str; } // "LF", "CRLF"
 ---------------------------------------------------------------------------
 ## buffer.rs — gap buffer of UTF-8 bytes
 
-All positions are BYTE offsets into the logical text. Callers keep them on char boundaries.
+Every position is a BYTE offset into the logical text, and callers keep them on char
+boundaries.
 
 ```rust
 pub struct Buffer { /* gap buffer: Vec<u8> with gap_start/gap_end; line_starts: Vec<usize>; undo stacks; dirty flag */ }
@@ -130,10 +139,10 @@ impl Buffer {
     pub fn take_first_dirty_line(&mut self) -> usize;
 }
 ```
-Line index update: on insert, count newlines in inserted text with simd and splice new entries into
-`line_starts`, then shift subsequent entries by `s.len()` (a tight loop the compiler vectorises).
-On delete, remove entries whose newline was inside the range and shift the rest.
-Gap growth: double capacity, min 4 KiB gap.
+Updating the line index: on insert, count the newlines in the inserted text with simd, splice
+the new entries into `line_starts`, then shift every later entry by `s.len()` (a tight loop the
+compiler vectorises). On delete, drop the entries whose newline was inside the range and shift
+the rest back. When the gap runs out, capacity doubles, with a 4 KiB minimum gap.
 
 ---------------------------------------------------------------------------
 ## syntax.rs
@@ -174,12 +183,21 @@ impl Highlighter {
     pub fn state_at(&mut self, line: usize, get_line: &mut dyn FnMut(usize, &mut Vec<u8>)) -> LineState;
 }
 ```
-Keyword tables: static sorted `&[&str]` per language, matched with binary search on the identifier
-bytes. Identifiers followed by `(` -> Function. Uppercase-initial identifiers in Rust/C#/Go/TS -> Type
-(plus primitive type keyword lists). Numbers: dec/hex/bin/float with suffixes. Strings with escapes.
-Rust raw strings r#".."# best effort, lifetimes `'a` not treated as char literal. Python triple quotes span lines.
-C-like `/* */` spans lines. `#` lines in C/C++ -> Preproc. Markdown: `#` headings -> Heading, `` ` `` code -> String,
-fenced ``` blocks -> String across lines. INI: `[section]` Keyword, `key` Type, `;`/`#` comment. HTML: tags Keyword, attrs Type, strings, `<!-- -->` comments spanning lines.
+Each language has a static, sorted `&[&str]` keyword table, matched by binary search on the
+identifier bytes. The lexer rules, roughly:
+
+- An identifier followed by `(` is a Function.
+- In Rust, C#, Go and TS, an identifier starting with an uppercase letter is a Type (on top of
+  each language's list of primitive types).
+- Numbers: decimal, hex, binary and float, with suffixes. Strings handle escapes.
+- Rust raw strings `r#".."#` are best effort, and lifetimes like `'a` aren't mistaken for char
+  literals. Python triple-quoted strings span lines.
+- C-like `/* */` comments span lines. In C/C++, `#` lines are Preproc.
+- Markdown: `#` headings are Heading, `` ` `` code is String, and fenced ``` blocks are String
+  across lines.
+- INI: `[section]` is Keyword, `key` is Type, `;` and `#` start comments.
+- HTML: tags are Keyword, attributes are Type, plus strings and `<!-- -->` comments spanning
+  lines.
 
 ---------------------------------------------------------------------------
 ## config.rs
@@ -253,10 +271,10 @@ impl Config {
     pub fn default_ini() -> String;
 }
 ```
-INI format:
+The INI format:
 ```
 [editor]
-font = Cascadia Mono
+font = Paper Mono
 font_size = 11
 tab_width = 4
 insert_spaces = false
@@ -275,7 +293,7 @@ ctrl+k = cut_line      ; rebind
 ctrl+q = none          ; unbind
 ```
 
-Default keymap: Windows Notepad keys plus line-editing extras:
+The default keymap is Windows Notepad's keys plus the line-editing extras:
 | chord | action | | chord | action |
 |---|---|---|---|---|
 | ctrl+s | save | | ctrl+shift+s | save_as |
@@ -300,8 +318,8 @@ Default keymap: Windows Notepad keys plus line-editing extras:
 | ctrl+plus/minus/0 | zoom in/out/reset | | alt+z | toggle_wrap |
 | alt+n | toggle_line_numbers | | alt+x | toggle_hints |
 
-(Shifted navigation keys — arrows, Home/End, PgUp/PgDn and their Ctrl forms — are not in the
-keymap; the window layer handles them directly and extends the selection.)
+The shifted navigation keys (arrows, Home/End, PgUp/PgDn and their Ctrl forms) aren't in the
+keymap. The window layer handles them directly and extends the selection.
 
 ---------------------------------------------------------------------------
 ## regex.rs — backtracking regex engine
@@ -321,18 +339,26 @@ impl Regex {
 impl Template { pub fn literal(s) -> Template; pub fn escapes(s) -> Result<..>; pub fn regex(s, &Regex) -> Result<..>;
                 pub fn expand(&self, t: &[u8], caps: &Captures, out: &mut Vec<u8>); }
 ```
-Pattern -> tree (parser with char positions for errors) -> instruction list -> backtracking VM over
-UTF-8 bytes with an explicit stack (Try / restore-capture / restore-mark frames), so deep patterns do
-not recurse. Lookaround and atomic groups run a sub-program; captures a successful positive
-lookahead sets are kept and restored on backtracking. Lookbehind tries starts from `pos - min` back to
-`pos - max` (byte length bounds from the tree; unbounded is allowed). `x*` over a body that can match
-empty gets Mark/Check instructions so an empty iteration ends the loop. Counted repeats are unrolled
-(max 1000; program max 200k instructions). Start positions are skipped with a hint computed from the
-tree: a literal prefix (SIMD `find` / `find_ascii_ci`), line starts, text start, or a first-byte set.
-Every instruction costs one step of the caller's budget. `^`/`$` are line anchors unless `(?-m)`.
-`\r\n` and `\R` compile to `\r?\n` because the buffer holds LF line breaks. Case folding is
-Unicode simple folding (single-char lowercase). Whole word wraps the pattern in a guard that only
-applies on a side where the match starts or ends with a word char.
+A pattern goes through four stages: parse to a tree (keeping char positions for error
+messages), compile to an instruction list, then run on a backtracking VM over the UTF-8 bytes.
+The VM uses an explicit stack (Try, restore-capture and restore-mark frames), so deeply nested
+patterns never recurse.
+
+- Lookaround and atomic groups run a sub-program. Captures set inside a successful positive
+  lookahead are kept, and restored on backtracking.
+- Lookbehind tries start positions from `pos - min` back to `pos - max`, using byte-length
+  bounds from the tree. Unbounded lookbehind is allowed.
+- `x*` over a body that can match empty gets Mark/Check instructions, so an empty iteration
+  ends the loop instead of spinning.
+- Counted repeats are unrolled (at most 1000; a program is capped at 200k instructions).
+- Start positions are skipped using a hint computed from the tree: a literal prefix (SIMD
+  `find` / `find_ascii_ci`), line starts, text start, or a first-byte set.
+- Every instruction costs one step of the caller's budget.
+- `^` and `$` are line anchors unless `(?-m)` is set.
+- `\r\n` and `\R` compile to `\r?\n`, because the buffer holds LF line breaks.
+- Case folding is Unicode simple folding (single-char lowercase).
+- Whole word wraps the pattern in a guard that only applies on a side where the match starts or
+  ends with a word char.
 
 ---------------------------------------------------------------------------
 ## search.rs — queries and scans
@@ -353,13 +379,17 @@ pub fn count(s, t, scope, budget); pub fn replace_all(s, t, scope, track: &mut [
 pub fn hits(s, t, from, limit, max, with_rep, budget) -> Result<Vec<Hit>, TooComplex>;
 pub fn completions(before: &str, field: Field, groups: usize, names: &[String]) -> Option<(usize, Vec<Completion>)>;
 ```
-Plain and escape-sequence text compile to literal regexes. Number range scans number tokens
-(`-?digits(.digits)?`, never starting inside another number) and compares as f64. Fuzzy is Sellers'
-edit-distance column with a swap rule (optimal string alignment), k = len / 4, end extended while the
-distance drops, start found by an anchored backward run. Replace all rebuilds only first-match..last-match
-and maps tracked positions (cursor, anchor, scope end). Budgets: FIND_BUDGET for commands,
-PREVIEW_BUDGET for the live preview and live count. `FIND_TOKENS` / `REPLACE_TOKENS` feed the
-dialog's ">" menus; `completions` feeds its completion list.
+Plain and escape-sequence text compile down to literal regexes. Number range scans number
+tokens (`-?digits(.digits)?`, never starting inside another number) and compares them as f64.
+
+Fuzzy matching runs Sellers' edit-distance column with a swap rule (optimal string alignment),
+with k = len / 4. The end of a match extends while the distance keeps dropping, and the start is
+found with an anchored backward run.
+
+Replace all only rebuilds the stretch from the first match to the last, and maps the tracked
+positions (cursor, anchor, scope end) through the change. There are two budgets: FIND_BUDGET
+for commands, and PREVIEW_BUDGET for the live preview and live count. `FIND_TOKENS` and
+`REPLACE_TOKENS` fill the dialog's ">" menus, and `completions` fills its completion list.
 
 ---------------------------------------------------------------------------
 ## editor.rs — platform independent
@@ -433,8 +463,8 @@ impl Editor {
     pub fn scroll_by(&mut self, lines: isize);
 }
 ```
-Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
-(continuation bytes are 0b10xxxxxx). Word = alphanumeric or '_' (ASCII) or any non-ASCII byte.
+Left, Right, Backspace and Delete always step over whole UTF-8 scalar values (continuation
+bytes are 0b10xxxxxx). A word char is an ASCII letter, digit or '_', or any non-ASCII byte.
 
 ---------------------------------------------------------------------------
 ## win/ (Windows only)
@@ -469,7 +499,7 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   last line, mode, scope); the live match count is cached by (version, generation, scope).
 - assets/note.manifest (embedded as RT_MANIFEST 1 by build.rs) selects Common Controls 6, so the
   dialog, message boxes and buttons use the current Windows look.
-  Tabs: `App` keeps the active document in `editor` and the others in `tabs`, where
+- Tabs: `App` keeps the active document in `editor` and the others in `tabs`, where
   `tabs[active]` is an empty placeholder. Switching is two `mem::swap`s (`swap_to`), then
   `switched`: no prompt stays open, Find resets its per-document caches, and the window
   follows the new tab. The strip (`tab_strip`, `TabStrip`) is 32 px at 96 dpi, shown per
@@ -482,7 +512,7 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   `restore_tabs`, `save_session` writes the open file paths and `active=<index>` to
   `%APPDATA%\note\session.txt` as the window is destroyed, and `restore_session` reads them
   at startup when no file was given (missing files are skipped).
-  Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
+- Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
   Save As lists "Text Documents (*.txt)" first: with it selected, a name typed without an extension
   gets .txt (`editor::save_as_path`); "All Files" keeps the name as typed. No lpstrDefExt: comdlg32
   can append it even after a typed extension it does not recognise (notes.md -> notes.md.txt).
