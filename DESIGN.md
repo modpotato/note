@@ -16,7 +16,7 @@ Linux:
 ```
 src/main.rs      #![windows_subsystem = "windows"]; on windows calls note::win::run(); else prints a message
 src/lib.rs       pub mod simd; pub mod buffer; pub mod syntax; pub mod config; pub mod editor; pub mod encoding;
-                 pub mod regex; pub mod search; #[cfg(windows)] pub mod win;
+                 pub mod regex; pub mod search; pub mod statusbar; #[cfg(windows)] pub mod win;
 src/simd.rs      SIMD byte kernels (SSE2 baseline, AVX2 runtime-dispatched)
 src/encoding.rs  file bytes <-> internal UTF-8 (+ line ending detection)
 src/buffer.rs    gap buffer + line index + undo/redo
@@ -25,6 +25,7 @@ src/config.rs    INI parsing, theme, keymap
 src/regex.rs     small backtracking regex engine + replacement templates
 src/search.rs    find/replace queries (plain, escapes, regex, number range, fuzzy) and scans
 src/editor.rs    platform-independent editor state & commands
+src/statusbar.rs status row text: message and readout fitted to the window's cells
 src/win/mod.rs   window, message loop, input -> editor::Command, dialogs, clipboard
 src/win/find.rs  Find/Replace dialog (in-memory template), live preview, regex completions
 src/win/render.rs GDI double-buffered painting
@@ -467,6 +468,20 @@ Left, Right, Backspace and Delete always step over whole UTF-8 scalar values (co
 bytes are 0b10xxxxxx). A word char is an ASCII letter, digit or '_', or any non-ASCII byte.
 
 ---------------------------------------------------------------------------
+## statusbar.rs — status row text
+
+```rust
+pub struct Fit { pub readout: usize, pub room: usize }
+pub fn fit(message_len: usize, readout_lens: &[usize], cells: usize) -> Fit;
+pub fn cut(message: &mut String, room: usize);   // in place; ends in "…" when it is cut
+```
+`cells` is the window width in whole cells. The message starts one cell in, the readout ends one
+cell short of the right edge, and two cells stay clear between them. Readouts run from most to
+least detailed: `fit` picks the first that leaves the message `min(its length, 8)` cells, so a short
+name is never cut to keep a detail, and the last is the fallback. Zoom is never limited to make the
+row fit. Pure, and allocation-free, so it is tested on Linux.
+
+---------------------------------------------------------------------------
 ## win/ (Windows only)
 
 - `run()`: SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2); read config from %APPDATA%\note\note.ini
@@ -530,6 +545,7 @@ bytes are 0b10xxxxxx). A word char is an ASCII letter, digit or '_', or any non-
   a close box or dirty dot, and the "+" button.
   Live preview: match_bg behind every match (under the selection), and the line-after-replace text in
   preview_fg after the end of each line that has a match ("→ ..."); line breaks show as '↵'.
-  Status bar: "path  |  Ln x, Col y  |  Lang  |  UTF-8  |  CRLF  |  message". Hint bar: two rows of
-  "^K Cut Line" pairs like nano, built from keymap.chord_for().
+  Status bar: file name or message on the left, "Ln x, Col y  |  Lang  |  UTF-8  |  CRLF  |  zoom%" on
+  the right. `statusbar::fit` picks the readout and cuts the left side, so the two never overlap at
+  any zoom. Hint bar: two rows of "^K Cut Line" pairs like nano, built from keymap.chord_for().
   BitBlt memory DC to window DC in WM_PAINT. Invalidate on change only.

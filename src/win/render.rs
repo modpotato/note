@@ -26,6 +26,7 @@ use super::{
 use crate::buffer::Buffer;
 use crate::config::{Action, Config, FontSmoothing, Rgb};
 use crate::editor::{wrap_rows_buf, Editor};
+use crate::statusbar;
 use crate::syntax::{highlight_line, Lang, Span, Tok};
 
 /// Cells per hint column; 6 columns per row fill the two hint rows.
@@ -89,6 +90,8 @@ pub(super) struct Renderer {
     runs: Vec<Run>,
     tmp: String,
     tmp16: Vec<u16>,
+    /// Status-row readouts, most detailed first. Rewritten on every paint, keeping their buffers.
+    readouts: [String; 3],
     /// Pre-rendered hint bar cells: (" key ", label).
     hints: Vec<(Vec<u16>, Vec<u16>)>,
     /// Pre-rendered help overlay entries: (key box text, name). The key is empty when the
@@ -144,6 +147,7 @@ impl Renderer {
             runs: Vec::new(),
             tmp: String::new(),
             tmp16: Vec::new(),
+            readouts: Default::default(),
             hints,
             help,
         }
@@ -638,6 +642,7 @@ impl Renderer {
     }
 
     /// Status row: the prompt while one is open, else message/file name and position info.
+    /// Zoomed in, the two may not both fit; `statusbar::fit` decides what gives way.
     fn draw_status(
         &mut self,
         ed: &Editor,
@@ -676,12 +681,13 @@ impl Renderer {
         if ed.mark_mode {
             left.push_str("  [Mark Set]");
         }
-        self.put(mem, lay.cw, y + self.text_dy, theme.status_fg, &left);
 
-        left.clear();
         let (line, col) = ed.cursor_line_col();
+        let mut readouts = std::mem::take(&mut self.readouts);
+        let [full, short, bare] = &mut readouts;
+        full.clear();
         let _ = write!(
-            left,
+            full,
             "Ln {}, Col {}  |  {}  |  {}  |  {}  |  {}%",
             line + 1,
             col + 1,
@@ -690,14 +696,24 @@ impl Renderer {
             ed.line_ending.name(),
             zoom
         );
-        let width = left.chars().count() as i32;
+        short.clear();
+        let _ = write!(short, "Ln {}, Col {}  |  {}%", line + 1, col + 1, zoom);
+        bare.clear();
+        let _ = write!(bare, "{zoom}%");
+
+        let lens = readouts.each_ref().map(|s| s.chars().count());
+        let fit = statusbar::fit(left.chars().count(), &lens, (lay.w / lay.cw) as usize);
+        statusbar::cut(&mut left, fit.room);
+        self.put(mem, lay.cw, y + self.text_dy, theme.status_fg, &left);
+        let width = lens[fit.readout] as i32;
         self.put(
             mem,
             (lay.w - (width + 1) * lay.cw).max(0),
             y + self.text_dy,
             theme.status_fg,
-            &left,
+            &readouts[fit.readout],
         );
+        self.readouts = readouts;
         self.tmp = left;
     }
 
