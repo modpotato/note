@@ -6,6 +6,7 @@ pub mod encoding;
 pub mod regex;
 pub mod search;
 pub mod simd;
+pub mod statusbar;
 pub mod syntax;
 #[cfg(windows)]
 pub mod win;
