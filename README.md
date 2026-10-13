@@ -81,8 +81,9 @@ Run the tests with `cargo test`.
 note [file]
 ```
 
-Pass a file to open it. You can also drag a file onto the window. Without a file, the editor
-opens an untitled document. Saving an untitled document asks for a name.
+Pass one or more files to open them, each in its own tab. You can also drag files onto the
+window. Without a file, the editor opens an untitled document, or the files of the last
+session when `restore_tabs` is on. Saving an untitled document asks for a name.
 
 In the Save As dialog, "Text Documents (*.txt)" adds `.txt` to a name typed without an
 extension: `notes` saves as `notes.txt`, while `notes.md` saves as `notes.md`. Switch the
@@ -105,8 +106,8 @@ action in the default keymap with all of its chords. Action names are the ones u
 | `save` | `^S` |
 | `save_as` | `^S-S` |
 | `open` | `^O` |
-| `new` | `^N` |
-| `exit` | `^Q` `^W` (and `Alt+F4`) |
+| `new` | `^T` `^N` |
+| `exit` | `^Q` (and `Alt+F4`) |
 | `undo` | `^Z` |
 | `redo` | `^Y` `^S-Z` |
 | `cut` | `^X` `S-Del` |
@@ -144,6 +145,22 @@ action in the default keymap with all of its chords. Action names are the ones u
 | `toggle_hints` | `M-X` |
 | `show_position` | `M-C` |
 | `help` | `F1` |
+| `close_tab` | `^W` `^F4` |
+| `reopen_tab` | `^S-T` |
+| `next_tab` | `^Tab` `^PgDn` |
+| `prev_tab` | `^S-Tab` `^PgUp` |
+| `tab_1` | `^1` |
+| `tab_2` | `^2` |
+| `tab_3` | `^3` |
+| `tab_4` | `^4` |
+| `tab_5` | `^5` |
+| `tab_6` | `^6` |
+| `tab_7` | `^7` |
+| `tab_8` | `^8` |
+| `last_tab` | `^9` |
+| `move_tab_left` | `^S-PgUp` |
+| `move_tab_right` | `^S-PgDn` |
+| `new_window` | `^S-N` |
 
 Shift with the arrows, `Home`, `End`, `PgUp`, `PgDn`, `^Home`, `^End`, `^Left` and `^Right`
 extends the selection. `^K` without a selection cuts the whole line; pressing it again
@@ -206,6 +223,33 @@ For example, find `(\w+)@(\w+)` and replace with `\U$2\E: $1`.
 Every search has a step budget, so a pattern that would take too long stops with a message
 instead of freezing the editor. Replace All is one undo step.
 
+## Tabs
+
+Each open file has its own tab, and a file that is already open is shown in its existing
+tab. Opening a file (`^O`, drag and drop, or the command line) fills the active tab when it
+is an empty untitled document, and otherwise opens a new tab after the active one.
+
+The tab bar is hidden while only one tab is open. `tab_bar` in `[editor]` changes that (see
+Configuration). The active tab shows a close box (`×`). A tab with unsaved changes shows a
+dot (`●`) in that place when it is neither active nor under the pointer.
+
+Keys: `^T` new tab, `^W` or `^F4` close tab, `^S-T` reopen the last closed tab (the last ten
+are kept), `^Tab` or `^PgDn` next tab, `^S-Tab` or `^PgUp` previous tab, `^1` to `^8` tab 1 to
+8, `^9` last tab, `^S-PgUp` and `^S-PgDn` move the tab left or right, `^S-N` opens another
+window.
+
+Mouse: drag a tab sideways to reorder it, middle click closes it, and double click on empty
+space in the bar, or click `+`, opens a new tab. The mouse wheel over the bar switches tabs.
+
+Closing a tab, or closing the window with `^Q` or the window's close button, asks about each
+tab with unsaved changes. Yes saves it (an untitled document opens Save As, and if that is
+cancelled the tab stays open), No discards the changes, and Cancel keeps everything open.
+Closing the window stops at the first Cancel.
+
+With `restore_tabs = true`, the files of the open tabs are saved to
+`%APPDATA%\note\session.txt` when the window closes, and the next start without files
+opens them again. Files that no longer exist are skipped.
+
 ## Configuration
 
 Settings live in `%APPDATA%\note\note.ini`. The file is created with the defaults on first
@@ -239,7 +283,8 @@ Chords can be written in nano notation (`^S-Z`) or by name (`ctrl+shift+z`, `alt
 `f3`). Colour keys are the theme names: `bg`, `fg`, `caret`, `selection_bg`,
 `current_line_bg`, `gutter_bg`, `gutter_fg`, `status_bg`, `status_fg`, `hint_key_fg`,
 `hint_fg`, the scrollbar colours `scrollbar_thumb`, `scrollbar_thumb_hover` and
-`scrollbar_track`, the live preview colours `match_bg` and `preview_fg`, and the token
+`scrollbar_track`, the live preview colours `match_bg` and `preview_fg`, the tab colours
+`tabbar_bg`, `tab_hover_bg` and `tab_fg`, and the token
 colours `keyword`, `type`, `string`, `number`, `comment`, `preproc`, `function`, `punct`,
 `heading`.
 
@@ -256,6 +301,13 @@ Font keys in `[editor]`:
 - `line_height` is the line pitch as a multiple of the font height, clamped to 1.0 to 2.5.
   Text is centred in each line. The default is 1.2.
 - `font_smoothing` is `cleartype`, `grayscale` or `none`. The default is `cleartype`.
+
+Tab keys in `[editor]`:
+
+- `tab_bar` is `auto`, `always` or `never`. `auto` shows the tab bar only when two or more
+  tabs are open. The default is `auto`.
+- `restore_tabs` reopens the files that were open when the editor last closed. The default
+  is `false`.
 
 ## Fonts
 
@@ -331,7 +383,8 @@ publishes the version in `Cargo.toml` as it is, and a minor or major release bum
 - Soft wrap (`M-Z`) breaks lines at word boundaries and is visual only. The vertical
   scrollbar still counts logical lines.
 - CJK and other wide characters take one cell.
-- One document per window, by design. Open another copy of the app for another file.
+- Tabs belong to one window. A file open in two windows is two separate documents, and
+  whichever copy is saved last wins.
 - Regex: no Unicode properties (`\p{...}`), recursion or conditionals. Line breaks in the
   text are `\n` whatever the file uses, so `\r` matches only a stray carriage return.
 - The Find/Replace dialog uses the light system style, even with the dark theme. Its options

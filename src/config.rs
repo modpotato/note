@@ -110,6 +110,11 @@ pub struct Theme {
     /// text that shows what a line becomes after Replace.
     pub match_bg: Rgb,
     pub preview_fg: Rgb,
+    /// Tab strip background, the background of a hovered inactive tab, and the text of
+    /// inactive tabs. The active tab is filled with `bg`, so it joins the text area.
+    pub tabbar_bg: Rgb,
+    pub tab_hover_bg: Rgb,
+    pub tab_fg: Rgb,
     /// Indexed by `Tok as usize`. `tok[0] == fg` always.
     pub tok: [Rgb; TOK_COUNT],
 }
@@ -135,6 +140,9 @@ impl Theme {
             scrollbar_track: Rgb(0x1f, 0x1f, 0x24),
             match_bg: Rgb(0x5c, 0x3a, 0x12),
             preview_fg: Rgb(0x8f, 0xc7, 0x8f),
+            tabbar_bg: Rgb(0x14, 0x14, 0x17),
+            tab_hover_bg: Rgb(0x26, 0x26, 0x2d),
+            tab_fg: Rgb(0x9a, 0x9a, 0xa4),
             tok: [
                 fg,                    // normal
                 Rgb(0x56, 0x9c, 0xd6), // keyword
@@ -170,6 +178,9 @@ impl Theme {
             scrollbar_track: Rgb(0xec, 0xec, 0xee),
             match_bg: Rgb(0xff, 0xd9, 0xa8),
             preview_fg: Rgb(0x2e, 0x7d, 0x32),
+            tabbar_bg: Rgb(0xdc, 0xdc, 0xe2),
+            tab_hover_bg: Rgb(0xec, 0xec, 0xf0),
+            tab_fg: Rgb(0x55, 0x55, 0x5e),
             tok: [
                 fg,                    // normal
                 Rgb(0x00, 0x00, 0xff), // keyword
@@ -204,6 +215,9 @@ impl Theme {
             ("scrollbar_track", self.scrollbar_track),
             ("match_bg", self.match_bg),
             ("preview_fg", self.preview_fg),
+            ("tabbar_bg", self.tabbar_bg),
+            ("tab_hover_bg", self.tab_hover_bg),
+            ("tab_fg", self.tab_fg),
         ];
         v.extend(TOKEN_NAMES.iter().copied().zip(self.tok.iter().copied()));
         v
@@ -231,6 +245,9 @@ impl Theme {
             "scrollbar_track" => self.scrollbar_track = c,
             "match_bg" => self.match_bg = c,
             "preview_fg" => self.preview_fg = c,
+            "tabbar_bg" => self.tabbar_bg = c,
+            "tab_hover_bg" => self.tab_hover_bg = c,
+            "tab_fg" => self.tab_fg = c,
             other => match TOKEN_NAMES.iter().position(|&n| n == other) {
                 Some(i) => self.tok[i] = c,
                 None => return false,
@@ -309,6 +326,22 @@ actions! {
     ToggleComment = "toggle_comment",
     MoveLineUp = "move_line_up",
     MoveLineDown = "move_line_down",
+    CloseTab = "close_tab",
+    ReopenTab = "reopen_tab",
+    NextTab = "next_tab",
+    PrevTab = "prev_tab",
+    Tab1 = "tab_1",
+    Tab2 = "tab_2",
+    Tab3 = "tab_3",
+    Tab4 = "tab_4",
+    Tab5 = "tab_5",
+    Tab6 = "tab_6",
+    Tab7 = "tab_7",
+    Tab8 = "tab_8",
+    LastTab = "last_tab",
+    MoveTabLeft = "move_tab_left",
+    MoveTabRight = "move_tab_right",
+    NewWindow = "new_window",
 }
 
 impl Action {
@@ -516,9 +549,10 @@ const DEFAULT_KEYS: &[(Chord, Action)] = &[
     (ch(b'S' as u16, CTRL), Action::Save),
     (ch(b'S' as u16, CTRL | SHIFT), Action::SaveAs),
     (ch(b'O' as u16, CTRL), Action::Open),
+    (ch(b'T' as u16, CTRL), Action::New),
     (ch(b'N' as u16, CTRL), Action::New),
     (ch(b'Q' as u16, CTRL), Action::Exit),
-    (ch(b'W' as u16, CTRL), Action::Exit),
+    (ch(b'W' as u16, CTRL), Action::CloseTab),
     // Edit
     (ch(b'Z' as u16, CTRL), Action::Undo),
     (ch(b'Y' as u16, CTRL), Action::Redo),
@@ -564,6 +598,25 @@ const DEFAULT_KEYS: &[(Chord, Action)] = &[
     (ch(b'X' as u16, ALT), Action::ToggleHints),
     (ch(b'C' as u16, ALT), Action::ShowPosition),
     (ch(VK_F1, 0), Action::Help),
+    // Tabs
+    (ch(VK_F1 + 3, CTRL), Action::CloseTab),
+    (ch(b'T' as u16, CTRL | SHIFT), Action::ReopenTab),
+    (ch(VK_TAB, CTRL), Action::NextTab),
+    (ch(VK_NEXT, CTRL), Action::NextTab),
+    (ch(VK_TAB, CTRL | SHIFT), Action::PrevTab),
+    (ch(VK_PRIOR, CTRL), Action::PrevTab),
+    (ch(b'1' as u16, CTRL), Action::Tab1),
+    (ch(b'2' as u16, CTRL), Action::Tab2),
+    (ch(b'3' as u16, CTRL), Action::Tab3),
+    (ch(b'4' as u16, CTRL), Action::Tab4),
+    (ch(b'5' as u16, CTRL), Action::Tab5),
+    (ch(b'6' as u16, CTRL), Action::Tab6),
+    (ch(b'7' as u16, CTRL), Action::Tab7),
+    (ch(b'8' as u16, CTRL), Action::Tab8),
+    (ch(b'9' as u16, CTRL), Action::LastTab),
+    (ch(VK_PRIOR, CTRL | SHIFT), Action::MoveTabLeft),
+    (ch(VK_NEXT, CTRL | SHIFT), Action::MoveTabRight),
+    (ch(b'N' as u16, CTRL | SHIFT), Action::NewWindow),
 ];
 
 /// Key bindings. Linear scan, which is fine for a few dozen entries.
@@ -614,6 +667,15 @@ pub enum FontSmoothing {
     Off,
 }
 
+/// When the tab bar is visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabBar {
+    /// Only when two or more tabs are open.
+    Auto,
+    Always,
+    Never,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Typefaces in order of preference, each at most 31 characters (LOGFONT limit). The
@@ -639,6 +701,10 @@ pub struct Config {
     pub auto_indent: bool,
     /// Caret width in pixels, clamped to 1..=10.
     pub caret_width: i32,
+    /// When the tab bar is shown.
+    pub tab_bar: TabBar,
+    /// Reopen the files that were open when the editor last closed.
+    pub restore_tabs: bool,
     pub theme: Theme,
     pub keymap: Keymap,
 }
@@ -661,6 +727,8 @@ impl Default for Config {
             syntax: true,
             auto_indent: true,
             caret_width: 2,
+            tab_bar: TabBar::Auto,
+            restore_tabs: false,
             theme: Theme::dark(),
             keymap: Keymap::standard(),
         }
@@ -904,6 +972,18 @@ fn apply_editor(cfg: &mut Config, key: &str, value: &str) {
         "highlight_current_line" => set_bool(value, &mut cfg.highlight_current_line),
         "syntax" => set_bool(value, &mut cfg.syntax),
         "auto_indent" => set_bool(value, &mut cfg.auto_indent),
+        "tab_bar" => {
+            let mode = match value.to_ascii_lowercase().as_str() {
+                "auto" => Some(TabBar::Auto),
+                "always" => Some(TabBar::Always),
+                "never" => Some(TabBar::Never),
+                _ => None,
+            };
+            if let Some(m) = mode {
+                cfg.tab_bar = m;
+            }
+        }
+        "restore_tabs" => set_bool(value, &mut cfg.restore_tabs),
         _ => {}
     }
 }
@@ -973,6 +1053,10 @@ syntax = true
 auto_indent = true
 ; Caret width in pixels, 1..10. Default: 2
 caret_width = 2
+; Tab bar: auto (only with two or more tabs), always or never. Default: auto
+tab_bar = auto
+; Reopen the files that were open when note last closed. Default: false
+restore_tabs = false
 ";
 
 #[cfg(test)]
@@ -1198,14 +1282,15 @@ mod tests {
 
     #[test]
     fn action_names_round_trip() {
-        assert_eq!(Action::ALL.len(), 42);
+        assert_eq!(Action::ALL.len(), 58);
         let mut names = HashSet::new();
         for &a in Action::ALL {
             let n = a.name();
             assert_eq!(Action::from_name(n), Some(a), "{n} should round trip");
             assert!(names.insert(n), "duplicate name {n}");
             assert!(
-                n.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'),
+                n.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'),
                 "{n} is not snake_case"
             );
         }
@@ -1224,9 +1309,10 @@ mod tests {
             ("ctrl+s", Action::Save),
             ("ctrl+shift+s", Action::SaveAs),
             ("ctrl+o", Action::Open),
+            ("ctrl+t", Action::New),
             ("ctrl+n", Action::New),
             ("ctrl+q", Action::Exit),
-            ("ctrl+w", Action::Exit),
+            ("ctrl+w", Action::CloseTab),
             ("ctrl+z", Action::Undo),
             ("ctrl+y", Action::Redo),
             ("ctrl+shift+z", Action::Redo),
@@ -1268,6 +1354,25 @@ mod tests {
             ("alt+x", Action::ToggleHints),
             ("alt+c", Action::ShowPosition),
             ("f1", Action::Help),
+            // Tabs
+            ("ctrl+f4", Action::CloseTab),
+            ("ctrl+shift+t", Action::ReopenTab),
+            ("ctrl+tab", Action::NextTab),
+            ("ctrl+pgdn", Action::NextTab),
+            ("ctrl+shift+tab", Action::PrevTab),
+            ("ctrl+pgup", Action::PrevTab),
+            ("ctrl+1", Action::Tab1),
+            ("ctrl+2", Action::Tab2),
+            ("ctrl+3", Action::Tab3),
+            ("ctrl+4", Action::Tab4),
+            ("ctrl+5", Action::Tab5),
+            ("ctrl+6", Action::Tab6),
+            ("ctrl+7", Action::Tab7),
+            ("ctrl+8", Action::Tab8),
+            ("ctrl+9", Action::LastTab),
+            ("ctrl+shift+pgup", Action::MoveTabLeft),
+            ("ctrl+shift+pgdn", Action::MoveTabRight),
+            ("ctrl+shift+n", Action::NewWindow),
         ];
         for (chord, action) in expect {
             assert_eq!(k.lookup(c(chord)), Some(action), "{chord}");
@@ -1277,6 +1382,8 @@ mod tests {
             assert!(k.chord_for(a).is_some(), "{} has no default key", a.name());
         }
         assert_eq!(k.chord_for(Action::Save), Some(c("ctrl+s")));
+        assert_eq!(k.chord_for(Action::New), Some(c("ctrl+t")));
+        assert_eq!(k.chord_for(Action::Exit), Some(c("ctrl+q")));
         // Shift+movement keys are left to the built-in selection handling.
         assert_eq!(k.lookup(c("shift+home")), None);
         assert_eq!(k.lookup(c("ctrl+shift+end")), None);
@@ -1543,6 +1650,21 @@ mod tests {
     }
 
     #[test]
+    fn tab_options_parse() {
+        let cfg = Config::parse("[editor]\ntab_bar = Never\nrestore_tabs = yes\n");
+        assert_eq!(cfg.tab_bar, TabBar::Never);
+        assert!(cfg.restore_tabs);
+
+        let cfg = Config::parse("[editor]\ntab_bar = ALWAYS\n");
+        assert_eq!(cfg.tab_bar, TabBar::Always);
+
+        // An invalid value keeps the default.
+        let cfg = Config::parse("[editor]\ntab_bar = sometimes\n");
+        assert_eq!(cfg.tab_bar, TabBar::Auto);
+        assert!(!cfg.restore_tabs);
+    }
+
+    #[test]
     fn empty_input_gives_defaults() {
         assert_eq!(Config::parse(""), Config::default());
         assert_eq!(
@@ -1576,6 +1698,8 @@ mod tests {
             "syntax",
             "auto_indent",
             "caret_width",
+            "tab_bar",
+            "restore_tabs",
             "base",
         ] {
             assert!(ini.contains(key), "missing {key}");

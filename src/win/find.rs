@@ -773,6 +773,15 @@ impl FindUi {
         self.preview_data.as_ref()
     }
 
+    /// Drops everything cached for the document on screen. Called when another tab is shown,
+    /// since the cached counts, previews and "In the Selection Only" range belong to one tab.
+    pub(super) fn reset_caches(&mut self) {
+        self.preview_key = None;
+        self.preview_data = None;
+        self.count_key = None;
+        self.scope = None;
+    }
+
     fn scope(&self) -> Option<(usize, usize)> {
         if self.selection_only {
             self.scope

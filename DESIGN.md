@@ -1,7 +1,8 @@
 # note — architecture & module contracts
 
-Ultra-light Win32 text editor. Pure Win32 + GDI, no frameworks, no tabs, no menu bar.
-Single window: text area + 1-line status bar + (toggleable) 2-line shortcut hint bar.
+Ultra-light Win32 text editor. Pure Win32 + GDI, no frameworks, no menu bar.
+One window with tabs: optional tab strip (shown with two or more tabs by default), text area,
+1-line status bar, (toggleable) 2-line shortcut hint bar.
 Dark by default, configurable via `%APPDATA%\note\note.ini`. Windows Notepad keys by default, plus
 a few line-editing extras (ctrl+k cut line, ctrl+d duplicate, alt+up/down move line).
 
@@ -194,6 +195,7 @@ pub struct Theme {
     pub hint_key_fg: Rgb, pub hint_fg: Rgb,
     pub scrollbar_thumb: Rgb, pub scrollbar_thumb_hover: Rgb, pub scrollbar_track: Rgb,
     pub match_bg: Rgb, pub preview_fg: Rgb,   // live preview: match background, line-after-replace text
+    pub tabbar_bg: Rgb, pub tab_hover_bg: Rgb, pub tab_fg: Rgb, // tab strip colours
     pub tok: [Rgb; syntax::TOK_COUNT],   // indexed by Tok as usize; tok[0] == fg
 }
 impl Theme { pub fn dark() -> Theme; pub fn light() -> Theme; }
@@ -205,6 +207,8 @@ pub enum Action {
     DocStart, DocEnd, WordLeft, WordRight, DeleteWordLeft, DeleteWordRight, ToggleLineNumbers, ToggleWrap,
     ToggleHints, ZoomIn, ZoomOut, ZoomReset, Indent, Unindent, DuplicateLine, MarkToggle /* mark mode: movement extends selection */,
     ToggleComment, MoveLineUp, MoveLineDown,
+    CloseTab, ReopenTab, NextTab, PrevTab, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8,
+    LastTab, MoveTabLeft, MoveTabRight, NewWindow,
 }
 impl Action { pub fn from_name(s: &str) -> Option<Action> /* snake_case e.g. "cut_line" */; pub fn name(self) -> &'static str; }
 
@@ -275,8 +279,12 @@ Default keymap: Windows Notepad keys plus line-editing extras:
 | chord | action | | chord | action |
 |---|---|---|---|---|
 | ctrl+s | save | | ctrl+shift+s | save_as |
-| ctrl+o | open | | ctrl+n | new |
-| ctrl+q / ctrl+w | exit (alt+f4 via DefWindowProc) | | F1 | help |
+| ctrl+o | open | | ctrl+t / ctrl+n | new tab |
+| ctrl+q | exit (alt+f4 via DefWindowProc) | | F1 | help |
+| ctrl+w / ctrl+f4 | close_tab | | ctrl+shift+t | reopen_tab |
+| ctrl+tab / ctrl+pgdn | next_tab | | ctrl+shift+tab / ctrl+pgup | prev_tab |
+| ctrl+1 .. ctrl+8 | tab_1 .. tab_8 | | ctrl+9 | last_tab |
+| ctrl+shift+pgup / pgdn | move_tab_left / right | | ctrl+shift+n | new_window |
 | ctrl+z | undo | | ctrl+y / ctrl+shift+z | redo |
 | ctrl+x / shift+delete | cut | | ctrl+c / ctrl+insert | copy |
 | ctrl+v / shift+insert | paste | | ctrl+a | select_all |
@@ -432,7 +440,8 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
 ## win/ (Windows only)
 
 - `run()`: SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2); read config from %APPDATA%\note\note.ini
-  (create with Config::default_ini() if missing); file path from command line (CommandLineToArgvW);
+  (create with Config::default_ini() if missing); file paths from the command line
+  (CommandLineToArgvW), one tab each (none: the saved session when restore_tabs is on);
   RegisterClassExW with no background brush (we paint everything; WM_ERASEBKGND returns 1);
   CreateWindowExW; dark title bar via DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE=20) when theme bg is dark;
   `DragAcceptFiles` for drag & drop open; message loop with GetMessageW/TranslateMessage/DispatchMessageW.
@@ -445,7 +454,7 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   wheel scrolls 3 lines (ctrl+wheel zooms). Scrollbars are custom-painted (no WS_VSCROLL): a vertical
   strip on the text's right edge and a horizontal one above the status row (only without wrap, when a
   visible line runs past the view). Hit-tested before the text in mouse messages; WM_SETCURSOR shows an arrow over them.
-- Prompt bar: goto-line and unsaved-changes prompts typed into the status line area — a tiny inline
+- Prompt bar: the goto-line prompt is typed into the status line area — a tiny inline
   single-line input owned by App (no EDIT control): Enter confirms, Esc cancels.
 - Find/Replace (find.rs): a modeless dialog from an in-memory DLGTEMPLATEEX (CreateDialogIndirectParamW,
   Segoe UI 9, laid out in dialog units like EmEditor's Replace dialog; Find mode hides the Replace row
@@ -460,7 +469,19 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   last line, mode, scope); the live match count is cached by (version, generation, scope).
 - assets/note.manifest (embedded as RT_MANIFEST 1 by build.rs) selects Common Controls 6, so the
   dialog, message boxes and buttons use the current Windows look.
-  Exit / open with unsaved changes -> nano-style prompt "Save modified buffer? (Y/N/^C)".
+  Tabs: `App` keeps the active document in `editor` and the others in `tabs`, where
+  `tabs[active]` is an empty placeholder. Switching is two `mem::swap`s (`swap_to`), then
+  `switched`: no prompt stays open, Find resets its per-document caches, and the window
+  follows the new tab. The strip (`tab_strip`, `TabStrip`) is 32 px at 96 dpi, shown per
+  `tab_bar`. While it is shown, `layout()` takes its height off the editor, `render::paint`
+  draws the strip at y=0 and offsets everything else with SetViewportOrgEx, and mouse y values
+  have the strip height subtracted before the text and scrollbar code sees them.
+  Closing a dirty tab, or exiting, asks with a MessageBoxW (`confirm_close_active`): Yes saves
+  (a failed or cancelled save counts as Cancel), No discards, Cancel stops. `request_exit`
+  asks about each dirty tab in turn and then quits; closing the last tab quits too. With
+  `restore_tabs`, `save_session` writes the open file paths and `active=<index>` to
+  `%APPDATA%\note\session.txt` as the window is destroyed, and `restore_session` reads them
+  at startup when no file was given (missing files are skipped).
   Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
   Save As lists "Text Documents (*.txt)" first: with it selected, a name typed without an extension
   gets .txt (`editor::save_as_path`); "All Files" keeps the name as typed. No lpstrDefExt: comdlg32
@@ -474,6 +495,9 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   highlight_line, convert UTF-8 -> UTF-16 into reusable scratch Vec<u16> while expanding tabs, emit
   ExtTextOutW runs per span color (SetTextColor). Selection: fill rect behind selected columns. Caret: own
   painted bar (no system caret) — blink with SetTimer 530ms, reset on input. Gutter with line numbers.
+  Tab strip (`draw_tab_bar`): rounded active tab filled with `bg` so it joins the text area,
+  hovered tab in tab_hover_bg, 1px separators between idle tabs, titles in Segoe UI 9 (`ui_font`),
+  a close box or dirty dot, and the "+" button.
   Live preview: match_bg behind every match (under the selection), and the line-after-replace text in
   preview_fg after the end of each line that has a match ("→ ..."); line breaks show as '↵'.
   Status bar: "path  |  Ln x, Col y  |  Lang  |  UTF-8  |  CRLF  |  message". Hint bar: two rows of

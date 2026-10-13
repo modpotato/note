@@ -45,18 +45,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     MessageBoxW, SystemParametersInfoW, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES,
     ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA,
-    HTCLIENT, IDC_ARROW, IDC_IBEAM, IDI_APPLICATION, IDYES, MB_DEFBUTTON2, MB_ICONWARNING,
-    MB_YESNO, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+    HTCLIENT, IDC_ARROW, IDC_IBEAM, IDI_APPLICATION, IDNO, IDYES, MB_DEFBUTTON2, MB_ICONWARNING,
+    MB_YESNO, MB_YESNOCANCEL, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
     WHEEL_DELTA, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
     WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT,
     WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
     WNDCLASSEXW, WS_EX_ACCEPTFILES, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::config::{
-    Action, Chord, Config, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
-    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
+    Action, Chord, Config, TabBar, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
+    VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
 };
 use crate::editor::{save_as_path, Editor, Move};
 use crate::simd;
@@ -88,6 +89,29 @@ const SB_MIN_THUMB_PX: i32 = 24;
 const SB_INSET_PX: i32 = 2;
 /// Lines moved per vertical wheel notch.
 const V_WHEEL_LINES: isize = 3;
+/// Tab strip sizes at 96 dpi: strip height, tab width limits, the left margin, the room
+/// kept at the right end for "+", the top of a tab and its corner radius, the title's left
+/// padding, the room right of the title for the close box or dirty dot, the close box and
+/// "+" button sizes, and the gaps around them.
+const TAB_BAR_PX: i32 = 32;
+const TAB_MAX_PX: i32 = 220;
+const TAB_MIN_PX: i32 = 56;
+const TAB_MARGIN_PX: i32 = 8;
+const TAB_RESERVE_PX: i32 = 40;
+const TAB_TOP_PX: i32 = 6;
+const TAB_RADIUS_PX: i32 = 8;
+const TAB_TEXT_PAD_PX: i32 = 12;
+const TAB_CLOSE_SPACE_PX: i32 = 28;
+const TAB_CLOSE_PX: i32 = 18;
+const TAB_CLOSE_INSET_PX: i32 = 8;
+const TAB_CLOSE_RADIUS_PX: i32 = 4;
+const TAB_PLUS_PX: i32 = 24;
+const TAB_PLUS_GAP_PX: i32 = 6;
+const TAB_SEP_INSET_PX: i32 = 8;
+/// Most closed documents kept for Ctrl+Shift+T.
+const CLOSED_TABS_MAX: usize = 10;
+/// Label of the goto-line prompt.
+const GOTO_LABEL: &str = "Enter line number, column number: ";
 
 /// Converts `s` to a NUL-terminated UTF-16 buffer for Win32 calls.
 fn wide(s: &str) -> Vec<u16> {
@@ -158,11 +182,12 @@ pub fn run() {
     if dark {
         enable_dark_app_mode();
     }
-    let file = std::env::args_os()
-        .nth(1)
-        .map(|a| a.to_string_lossy().into_owned());
+    let files: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     // Owned by the window from here on: freed in WM_NCDESTROY (or below on failure).
-    let raw = Box::into_raw(Box::new(App::new(config, file, dark)));
+    let raw = Box::into_raw(Box::new(App::new(config, files, dark)));
 
     // SAFETY: standard class registration and creation. The App pointer travels through
     // lpCreateParams to WM_NCCREATE and is freed in WM_NCDESTROY.
@@ -253,12 +278,17 @@ fn luminance(r: u8, g: u8, b: u8) -> u32 {
     (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000
 }
 
+/// `%APPDATA%\note`, which holds note.ini and session.txt.
+fn app_dir() -> Option<std::path::PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(std::path::PathBuf::from(appdata).join("note"))
+}
+
 /// Reads `%APPDATA%\note\note.ini`, creating it with the defaults when missing.
 fn load_config() -> Config {
-    let Ok(appdata) = std::env::var("APPDATA") else {
+    let Some(dir) = app_dir() else {
         return Config::default();
     };
-    let dir = std::path::PathBuf::from(appdata).join("note");
     let file = dir.join("note.ini");
     if !file.exists() {
         let _ = std::fs::create_dir_all(&dir);
@@ -267,6 +297,36 @@ fn load_config() -> Config {
     match std::fs::read(&file) {
         Ok(bytes) => Config::parse(&String::from_utf8_lossy(&bytes)),
         Err(_) => Config::default(),
+    }
+}
+
+/// The paths and active index written by `App::save_session`, or None without a session file.
+fn read_session() -> Option<(Vec<String>, usize)> {
+    let text = std::fs::read_to_string(app_dir()?.join("session.txt")).ok()?;
+    let mut paths = Vec::new();
+    let mut active = 0;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("active=") {
+            active = v.trim().parse().unwrap_or(0);
+        } else if !line.trim().is_empty() {
+            paths.push(line.to_string());
+        }
+    }
+    Some((paths, active))
+}
+
+/// File name of a document for titles and messages, or "Untitled" when it has no path.
+fn doc_name(ed: &Editor) -> &str {
+    match &ed.path {
+        Some(p) => p.rsplit(['\\', '/']).next().unwrap_or(p.as_str()),
+        None => "Untitled",
+    }
+}
+
+/// Starts another copy of the program with no files. Errors are ignored.
+fn spawn_window() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
     }
 }
 
@@ -299,6 +359,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         // DestroyWindow re-enters this procedure (focus, activation, WM_DESTROY, ...) and
         // frees `app` in WM_NCDESTROY, so mark it first and never touch `app` afterwards.
         app.destroying = true;
+        app.save_session();
         DestroyWindow(hwnd);
         return 0;
     }
@@ -309,7 +370,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 fn handle(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     match msg {
         WM_CREATE => app.on_create(hwnd),
-        WM_CLOSE => app.request(hwnd, Pending::Exit),
+        WM_CLOSE => app.request_exit(hwnd),
         WM_ERASEBKGND => return Some(1),
         WM_PAINT => app.on_paint(hwnd),
         WM_SIZE => app.on_size(hwnd, lp),
@@ -337,6 +398,7 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option
         WM_LBUTTONDBLCLK => app.on_double_click(hwnd, lp),
         WM_MOUSEMOVE => app.on_mouse_move(hwnd, lp, wp),
         WM_LBUTTONUP => app.on_mouse_up(hwnd),
+        WM_MBUTTONUP => app.on_middle_up(hwnd, lp),
         WM_MOUSELEAVE => app.on_mouse_leave(hwnd),
         WM_SETCURSOR => {
             // Only the client area is ours; borders and the caption keep their cursors.
@@ -405,7 +467,10 @@ fn wheel_delta(wp: WPARAM) -> i32 {
 #[derive(Clone, Copy)]
 struct Layout {
     w: i32,
+    /// Height of the editor: the client height less the tab strip.
     h: i32,
+    /// Height of the tab strip above the editor, 0 when hidden.
+    tabbar_h: i32,
     lh: i32,
     cw: i32,
     /// Height of the text area, above the status row. The horizontal scrollbar strip, when
@@ -494,31 +559,102 @@ struct SbDrag {
     max: usize,
 }
 
-/// Command that waits for the unsaved-changes answer, or runs right away.
-#[derive(Clone)]
-enum Pending {
-    Exit,
+/// What the pointer is over in the tab strip. Tab indices are absolute.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabHit {
+    /// The title of a tab.
+    Tab(usize),
+    /// The close box of a tab, or its dirty dot.
+    Close(usize),
+    /// The "+" button.
     New,
-    Open,
-    OpenPath(String),
 }
 
-#[derive(Clone)]
-enum PromptKind {
-    GotoLine,
-    Confirm(Pending),
-}
-
-impl PromptKind {
-    /// Text prompts take a line of input; the others only take single keys.
-    fn takes_text(&self) -> bool {
-        !matches!(self, PromptKind::Confirm(_))
+impl TabHit {
+    /// The tab this item belongs to, or None for the "+" button.
+    fn tab_index(self) -> Option<usize> {
+        match self {
+            TabHit::Tab(i) | TabHit::Close(i) => Some(i),
+            TabHit::New => None,
+        }
     }
 }
 
-/// nano-style prompt shown in the status row.
+/// Geometry of the tab strip for one frame, in client pixels. Slot `k` is the `k`-th tab
+/// drawn, which is tab `first + k`.
+#[derive(Clone, Copy)]
+struct TabStrip {
+    /// Client width and strip height.
+    w: i32,
+    h: i32,
+    dpi: u32,
+    /// Left margin before the first slot, and the width of one slot.
+    margin: i32,
+    tab_w: i32,
+    /// Index of the first tab drawn, and how many tabs are drawn.
+    first: usize,
+    count: usize,
+    /// The active tab.
+    active: usize,
+}
+
+impl TabStrip {
+    /// `v` at 96 dpi, scaled to this strip's dpi.
+    fn px(&self, v: i32) -> i32 {
+        scaled(v, self.dpi)
+    }
+
+    /// Left edge of slot `k`.
+    fn slot_x(&self, k: usize) -> i32 {
+        self.margin + k as i32 * self.tab_w
+    }
+
+    /// Area of slot `k`: from the top of the tabs down to the bottom of the strip.
+    fn slot(&self, k: usize) -> RECT {
+        let x = self.slot_x(k);
+        rect(x, self.px(TAB_TOP_PX), x + self.tab_w, self.h)
+    }
+
+    /// Close box of slot `k`: a square at the right of the tab, centred vertically.
+    fn close_box(&self, k: usize) -> RECT {
+        let s = self.slot(k);
+        let size = self.px(TAB_CLOSE_PX);
+        let right = s.right - self.px(TAB_CLOSE_INSET_PX);
+        let top = (s.top + self.h) / 2 - size / 2;
+        rect(right - size, top, right, top + size)
+    }
+
+    /// The "+" button, just after the last drawn tab.
+    fn plus_box(&self) -> RECT {
+        let size = self.px(TAB_PLUS_PX);
+        let x = self.slot_x(self.count) + self.px(TAB_PLUS_GAP_PX);
+        let y = (self.h - size) / 2;
+        rect(x, y, x + size, y + size)
+    }
+
+    /// The strip item at a point in client pixels, or None.
+    fn hit(&self, x: i32, y: i32) -> Option<TabHit> {
+        if y < 0 || y >= self.h {
+            return None;
+        }
+        if inside(&self.plus_box(), x, y) {
+            return Some(TabHit::New);
+        }
+        (0..self.count).find_map(|k| {
+            inside(&self.slot(k), x, y).then(|| {
+                let i = self.first + k;
+                if inside(&self.close_box(k), x, y) {
+                    TabHit::Close(i)
+                } else {
+                    TabHit::Tab(i)
+                }
+            })
+        })
+    }
+}
+
+/// nano-style prompt shown in the status row (Ctrl+G only).
 struct Prompt {
-    kind: PromptKind,
     label: String,
     text: String,
     /// Byte offset of the input caret, always on a char boundary.
@@ -558,13 +694,6 @@ impl Prompt {
     }
 }
 
-fn prompt_label(kind: &PromptKind) -> String {
-    match kind {
-        PromptKind::GotoLine => "Enter line number, column number: ".to_string(),
-        PromptKind::Confirm(_) => "Save modified buffer? (Y)es (N)o (C)ancel".to_string(),
-    }
-}
-
 /// Characters that make up a "word" for double-click and word motion. Non-ASCII bytes count
 /// as word bytes so multi-byte characters stay together.
 fn is_word_byte(b: u8) -> bool {
@@ -583,7 +712,21 @@ fn digits(mut n: usize) -> usize {
 
 /// Window state. Owned by the window through a Box pointer in GWLP_USERDATA.
 struct App {
+    /// The active tab's document. The other tabs' documents are in `tabs`.
     editor: Editor,
+    /// One entry per tab. `tabs[active]` is an empty placeholder: the live document is `editor`.
+    tabs: Vec<Editor>,
+    active: usize,
+    /// Documents closed this session, most recent last, for Ctrl+Shift+T.
+    closed: Vec<Editor>,
+    /// First tab slot drawn in the tab strip.
+    tab_first: usize,
+    /// Item under the pointer in the tab strip.
+    tab_hot: Option<TabHit>,
+    /// The left button is held on a tab: moving the pointer reorders the tabs.
+    tab_drag: bool,
+    /// Wheel movement over the tab strip not yet turned into a tab switch.
+    wheel_t: i32,
     config: Config,
     renderer: Renderer,
     /// Font size delta in points, applied on top of `config.font_size`.
@@ -621,21 +764,19 @@ struct App {
 }
 
 impl App {
-    fn new(config: Config, file: Option<String>, dark: bool) -> App {
-        let mut editor = Editor::new(&config);
-        if let Some(path) = file {
-            match std::fs::read(&path) {
-                Ok(bytes) => editor.load_owned(&path, bytes),
-                Err(e) if e.kind() == ErrorKind::NotFound => {
-                    editor.load_owned(&path, Vec::new());
-                    editor.message = Some("New file".to_string());
-                }
-                Err(e) => editor.message = Some(format!("Cannot open {path}: {e}")),
-            }
-        }
+    fn new(config: Config, files: Vec<String>, dark: bool) -> App {
         let renderer = Renderer::new(&config);
-        App {
+        let editor = Editor::new(&config);
+        let tabs = vec![Editor::new(&config)];
+        let mut app = App {
             editor,
+            tabs,
+            active: 0,
+            closed: Vec::new(),
+            tab_first: 0,
+            tab_hot: None,
+            tab_drag: false,
+            wheel_t: 0,
             config,
             renderer,
             zoom: 0,
@@ -661,7 +802,17 @@ impl App {
             dark,
             quit: false,
             destroying: false,
+        };
+        if files.is_empty() {
+            if app.config.restore_tabs {
+                app.restore_session();
+            }
+        } else {
+            for path in &files {
+                app.place_path(path);
+            }
         }
+        app
     }
 
     /// Effective font size in points, kept within MIN_PT..=MAX_PT.
@@ -694,7 +845,8 @@ impl App {
         let lh = self.renderer.line_h.max(1);
         let cw = self.renderer.char_w.max(1);
         let w = self.client_w.max(1);
-        let h = self.client_h.max(1);
+        let tabbar_h = self.tabbar_h();
+        let h = (self.client_h - tabbar_h).max(1);
         let sb = scaled(SB_THICK_PX, self.dpi);
         let hint_rows = if self.config.show_hints { 2 } else { 0 };
         let text_h = (h - (1 + hint_rows) * lh).max(0);
@@ -717,6 +869,7 @@ impl App {
         Layout {
             w,
             h,
+            tabbar_h,
             lh,
             cw,
             text_h,
@@ -896,6 +1049,7 @@ impl App {
         // Wrapping width follows the window and the font, so it is refreshed on every command.
         self.editor.wrap_cols = lay.cols;
         self.editor.ensure_cursor_visible(lay.rows, lay.cols);
+        self.tab_first = self.tab_strip().map_or(0, |s| s.first);
         self.sync_title(hwnd);
         self.caret_visible = true;
         self.start_blink(hwnd);
@@ -1048,12 +1202,8 @@ impl App {
         if m.altgr {
             return false;
         }
-        let Some(kind) = self.prompt.as_ref().map(|p| p.kind.clone()) else {
+        if self.prompt.is_none() {
             return false;
-        };
-        if !kind.takes_text() {
-            self.confirm_key(hwnd, kind, vk);
-            return true;
         }
         match vk {
             VK_RETURN => self.prompt_confirm(hwnd),
@@ -1087,62 +1237,30 @@ impl App {
         true
     }
 
-    /// Y / N / A / C / Esc answers for the single-key prompts.
-    fn confirm_key(&mut self, hwnd: HWND, kind: PromptKind, vk: u16) {
-        const KEY_Y: u16 = b'Y' as u16;
-        const KEY_N: u16 = b'N' as u16;
-        const KEY_C: u16 = b'C' as u16;
-        match kind {
-            PromptKind::Confirm(pending) => match vk {
-                KEY_Y => {
-                    self.prompt = None;
-                    if self.save(hwnd) {
-                        self.perform(hwnd, pending);
-                    }
-                }
-                KEY_N => {
-                    self.prompt = None;
-                    self.perform(hwnd, pending);
-                }
-                KEY_C | VK_ESCAPE => self.prompt = None,
-                _ => {}
-            },
-            PromptKind::GotoLine => {}
-        }
-        self.after_command(hwnd);
-    }
-
-    /// Enter in a text prompt: does the prompt's job and usually closes it.
+    /// Enter in the goto prompt: goes to the line and column it names, then closes.
     fn prompt_confirm(&mut self, hwnd: HWND) {
         let Some(prompt) = self.prompt.take() else {
             return;
         };
-        match prompt.kind {
-            PromptKind::GotoLine => {
-                let mut parts = prompt.text.split(',');
-                let line = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
-                let col = parts
-                    .next()
-                    .and_then(|s| s.trim().parse::<usize>().ok())
-                    .unwrap_or(1);
-                match line {
-                    Some(l) => self.editor.goto_line(l, col),
-                    None => self.editor.message = Some("Invalid line number".to_string()),
-                }
-            }
-            PromptKind::Confirm(_) => {}
+        let mut parts = prompt.text.split(',');
+        let line = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+        let col = parts
+            .next()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1);
+        match line {
+            Some(l) => self.editor.goto_line(l, col),
+            None => self.editor.message = Some("Invalid line number".to_string()),
         }
         self.after_command(hwnd);
     }
 
-    fn open_prompt(&mut self, kind: PromptKind, text: String) {
-        let label = prompt_label(&kind);
-        let cursor = text.len();
+    /// Ctrl+G: opens the goto prompt, empty.
+    fn open_goto_prompt(&mut self) {
         self.prompt = Some(Prompt {
-            kind,
-            label,
-            text,
-            cursor,
+            label: GOTO_LABEL.to_string(),
+            text: String::new(),
+            cursor: 0,
         });
     }
 
@@ -1175,11 +1293,9 @@ impl App {
             return;
         }
         if let Some(p) = self.prompt.as_mut() {
-            if p.kind.takes_text() {
-                let mut b = [0u8; 4];
-                p.insert(ch.encode_utf8(&mut b));
-                self.after_command(hwnd);
-            }
+            let mut b = [0u8; 4];
+            p.insert(ch.encode_utf8(&mut b));
+            self.after_command(hwnd);
             return;
         }
         self.editor.message = None;
@@ -1210,9 +1326,43 @@ impl App {
             Action::SaveAs => {
                 self.save_as(hwnd);
             }
-            Action::Open => self.request(hwnd, Pending::Open),
-            Action::New => self.request(hwnd, Pending::New),
-            Action::Exit => self.request(hwnd, Pending::Exit),
+            Action::Open => {
+                if let Some(path) = open_dialog(hwnd) {
+                    self.open_paths(hwnd, &[path]);
+                }
+            }
+            Action::New => self.new_tab(hwnd),
+            Action::Exit => self.request_exit(hwnd),
+            Action::CloseTab => self.close_tab_checked(hwnd, self.active),
+            Action::ReopenTab => self.reopen_tab(hwnd),
+            Action::NextTab => self.activate(hwnd, (self.active + 1) % self.tab_count()),
+            Action::PrevTab => {
+                let n = self.tab_count();
+                self.activate(hwnd, (self.active + n - 1) % n);
+            }
+            Action::Tab1 => self.activate(hwnd, 0),
+            Action::Tab2 => self.activate(hwnd, 1),
+            Action::Tab3 => self.activate(hwnd, 2),
+            Action::Tab4 => self.activate(hwnd, 3),
+            Action::Tab5 => self.activate(hwnd, 4),
+            Action::Tab6 => self.activate(hwnd, 5),
+            Action::Tab7 => self.activate(hwnd, 6),
+            Action::Tab8 => self.activate(hwnd, 7),
+            Action::LastTab => {
+                let last = self.tab_count() - 1;
+                self.activate(hwnd, last);
+            }
+            Action::MoveTabLeft => {
+                if self.active > 0 {
+                    self.move_tab(self.active, self.active - 1);
+                }
+            }
+            Action::MoveTabRight => {
+                if self.active + 1 < self.tab_count() {
+                    self.move_tab(self.active, self.active + 1);
+                }
+            }
+            Action::NewWindow => spawn_window(),
             Action::CutLine => {
                 let text = self.editor.cut_line();
                 clipboard_set(hwnd, &text);
@@ -1224,7 +1374,7 @@ impl App {
             Action::FindNext => self.find_again(hwnd, true),
             Action::FindPrev => self.find_again(hwnd, false),
             Action::Replace => self.open_find(hwnd, true),
-            Action::GotoLine => self.open_prompt(PromptKind::GotoLine, String::new()),
+            Action::GotoLine => self.open_goto_prompt(),
             Action::ShowPosition => self.show_position(),
             Action::Help => {
                 self.show_help = !self.show_help;
@@ -1345,26 +1495,352 @@ impl App {
 
     // ----- confirm and file I/O ----------------------------------------------
 
-    /// Runs `p` now, or after the unsaved-changes prompt when the buffer is dirty.
-    fn request(&mut self, hwnd: HWND, p: Pending) {
-        if self.editor.is_dirty() {
-            self.open_prompt(PromptKind::Confirm(p), String::new());
+    // ----- tabs ---------------------------------------------------------------
+    //
+    // `editor` is the active document. `tabs[i]` holds the document of tab i for every
+    // i != `active`, and `tabs[active]` is an empty placeholder, so switching tabs is two
+    // swaps and the rest of the code only ever sees `editor`.
+
+    /// Number of tabs.
+    fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// Document of tab `i`.
+    fn tab_editor(&self, i: usize) -> &Editor {
+        if i == self.active {
+            &self.editor
         } else {
-            self.perform(hwnd, p);
+            self.tabs.get(i).unwrap_or(&self.editor)
         }
     }
 
-    fn perform(&mut self, hwnd: HWND, p: Pending) {
-        match p {
-            Pending::Exit => self.quit = true,
-            Pending::New => self.editor = Editor::new(&self.config),
-            Pending::Open => {
-                if let Some(path) = open_dialog(hwnd) {
-                    self.load_path(&path);
+    /// True when the tab strip is shown: always, never, or (Auto) with two or more tabs.
+    fn tab_bar_shown(&self) -> bool {
+        match self.config.tab_bar {
+            TabBar::Always => true,
+            TabBar::Auto => self.tab_count() >= 2,
+            TabBar::Never => false,
+        }
+    }
+
+    /// Height of the tab strip in pixels, 0 when hidden.
+    fn tabbar_h(&self) -> i32 {
+        if self.tab_bar_shown() {
+            scaled(TAB_BAR_PX, self.dpi)
+        } else {
+            0
+        }
+    }
+
+    /// Geometry of the tab strip, or None when hidden. The first slot is `tab_first`, moved
+    /// only as far as needed to keep the active tab in view. Slots are as wide as the room
+    /// divided by the tab count, within TAB_MIN_PX..=TAB_MAX_PX.
+    fn tab_strip(&self) -> Option<TabStrip> {
+        if !self.tab_bar_shown() {
+            return None;
+        }
+        let dpi = self.dpi;
+        let margin = scaled(TAB_MARGIN_PX, dpi);
+        let total = self.tab_count();
+        let avail = (self.client_w - margin - scaled(TAB_RESERVE_PX, dpi)).max(0);
+        let tab_w = (avail / total as i32).clamp(scaled(TAB_MIN_PX, dpi), scaled(TAB_MAX_PX, dpi));
+        let fit = ((avail / tab_w) as usize).clamp(1, total);
+        let mut first = self.tab_first.min(total - 1);
+        if self.active < first {
+            first = self.active;
+        }
+        if self.active >= first + fit {
+            first = self.active + 1 - fit;
+        }
+        let first = first.min(total - fit);
+        Some(TabStrip {
+            w: self.client_w,
+            h: scaled(TAB_BAR_PX, dpi),
+            dpi,
+            margin,
+            tab_w,
+            first,
+            count: fit,
+            active: self.active,
+        })
+    }
+
+    /// Makes tab `b` the active one. Only the swap is done; see `activate` for the rest.
+    fn swap_to(&mut self, b: usize) {
+        let a = self.active;
+        if a == b || b >= self.tabs.len() {
+            return;
+        }
+        std::mem::swap(&mut self.editor, &mut self.tabs[a]);
+        std::mem::swap(&mut self.editor, &mut self.tabs[b]);
+        self.active = b;
+    }
+
+    /// Work after the active tab changed: no prompt stays open, the find caches belong to
+    /// the old document, and the window follows the new one.
+    fn switched(&mut self, hwnd: HWND) {
+        self.prompt = None;
+        self.find.reset_caches();
+        self.after_command(hwnd);
+    }
+
+    /// Shows tab `i`.
+    fn activate(&mut self, hwnd: HWND, i: usize) {
+        if i == self.active || i >= self.tab_count() {
+            return;
+        }
+        self.swap_to(i);
+        self.switched(hwnd);
+    }
+
+    /// Puts `doc` in a new tab right after the active one, without showing it. Returns its index.
+    fn insert_after_active(&mut self, doc: Editor) -> usize {
+        let i = self.active + 1;
+        self.tabs.insert(i, doc);
+        i
+    }
+
+    /// Opens an empty tab after the active one and shows it.
+    fn new_tab(&mut self, hwnd: HWND) {
+        let doc = Editor::new(&self.config);
+        let i = self.insert_after_active(doc);
+        self.activate(hwnd, i);
+    }
+
+    /// Shows the most recently closed document, in a new tab after the active one.
+    fn reopen_tab(&mut self, hwnd: HWND) {
+        if let Some(doc) = self.closed.pop() {
+            let i = self.insert_after_active(doc);
+            self.activate(hwnd, i);
+        }
+    }
+
+    /// Closes tab `i` without asking. Its document goes to the reopen list. Closing the
+    /// last tab ends the program.
+    fn close_tab(&mut self, hwnd: HWND, i: usize) {
+        if i >= self.tab_count() {
+            return;
+        }
+        if self.tab_count() == 1 {
+            self.quit = true;
+            return;
+        }
+        let was_active = i == self.active;
+        if was_active {
+            // The tab on the right takes over, or the one on the left at the end.
+            let next = if i + 1 < self.tab_count() { i + 1 } else { i - 1 };
+            self.swap_to(next);
+        }
+        // The closed document now sits at `i`, whichever tab was active.
+        let doc = self.tabs.remove(i);
+        if i < self.active {
+            self.active -= 1;
+        }
+        if self.closed.len() == CLOSED_TABS_MAX {
+            self.closed.remove(0);
+        }
+        self.closed.push(doc);
+        self.tab_hot = None;
+        if was_active {
+            self.switched(hwnd);
+        } else {
+            self.after_command(hwnd);
+        }
+    }
+
+    /// Closes tab `i` after asking about its unsaved changes. The tab is shown while it is
+    /// asked about, and stays open on Cancel or when the save does not happen.
+    fn close_tab_checked(&mut self, hwnd: HWND, i: usize) {
+        if i >= self.tab_count() {
+            return;
+        }
+        if self.tab_editor(i).is_dirty() {
+            self.activate(hwnd, i);
+            if !self.confirm_close_active(hwnd) {
+                self.after_command(hwnd);
+                return;
+            }
+        }
+        self.close_tab(hwnd, i);
+    }
+
+    /// Moves tab `from` to position `to`. The active tab stays the active one.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        let n = self.tab_count();
+        if from == to || from >= n || to >= n {
+            return;
+        }
+        let doc = self.tabs.remove(from);
+        self.tabs.insert(to, doc);
+        let a = self.active;
+        self.active = if a == from {
+            to
+        } else if from < a && a <= to {
+            a - 1
+        } else if to <= a && a < from {
+            a + 1
+        } else {
+            a
+        };
+    }
+
+    /// Index of the open tab that shows `path` (case-insensitive).
+    fn tab_for_path(&self, path: &str) -> Option<usize> {
+        let want = path.to_lowercase();
+        (0..self.tab_count()).find(|&i| {
+            self.tab_editor(i)
+                .path
+                .as_deref()
+                .is_some_and(|p| p.to_lowercase() == want)
+        })
+    }
+
+    /// Loads the file at `path` into a tab, without redrawing. A tab that already shows it
+    /// is shown again. The active tab is reused when it is an empty untitled document;
+    /// otherwise the file gets a new tab after the active one.
+    fn place_path(&mut self, path: &str) {
+        if let Some(i) = self.tab_for_path(path) {
+            self.swap_to(i);
+            return;
+        }
+        let untitled = self.editor.path.is_none()
+            && self.editor.buf.is_empty()
+            && !self.editor.is_dirty();
+        if !untitled {
+            let doc = Editor::new(&self.config);
+            let i = self.insert_after_active(doc);
+            self.swap_to(i);
+        }
+        self.load_path(path);
+    }
+
+    /// Opens each file in a tab and shows the last one.
+    fn open_paths(&mut self, hwnd: HWND, paths: &[String]) {
+        for path in paths {
+            self.place_path(path);
+        }
+        self.switched(hwnd);
+    }
+
+    /// Reorder drag: while the left button is held on a tab, the active tab moves past a
+    /// visible neighbour once the pointer is beyond that neighbour's centre. The hover
+    /// follows the dragged tab.
+    fn tab_drag_move(&mut self, hwnd: HWND, strip: TabStrip, x: i32, y: i32) {
+        // Horizontal centre of tab `j` while it is drawn in the strip.
+        let centre = |j: usize| -> Option<i32> {
+            (j >= strip.first && j < strip.first + strip.count)
+                .then(|| strip.slot_x(j - strip.first) + strip.tab_w / 2)
+        };
+        loop {
+            let i = self.active;
+            let to = if i > 0 && centre(i - 1).is_some_and(|c| x < c) {
+                i - 1
+            } else if centre(i + 1).is_some_and(|c| x > c) {
+                i + 1
+            } else {
+                break;
+            };
+            self.move_tab(i, to);
+        }
+        let hot = self.tab_strip().and_then(|s| s.hit(x, y));
+        self.set_tab_hot(hwnd, hot);
+        self.after_command(hwnd);
+    }
+
+    // ----- unsaved changes, exit and session ----------------------------------
+
+    /// Asks whether the active tab's changes should be saved before the tab goes. Returns
+    /// true when it may go: the answer was Yes and the save happened, or the answer was No.
+    fn confirm_close_active(&mut self, hwnd: HWND) -> bool {
+        let text = wide(&format!(
+            "Do you want to save changes to {}?",
+            doc_name(&self.editor)
+        ));
+        let caption = wide("note");
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        let answer = unsafe {
+            MessageBoxW(
+                hwnd,
+                text.as_ptr(),
+                caption.as_ptr(),
+                MB_YESNOCANCEL | MB_ICONWARNING,
+            )
+        };
+        match answer {
+            IDYES => self.save(hwnd),
+            IDNO => true,
+            _ => false,
+        }
+    }
+
+    /// Closes the window once every unsaved tab is settled. Each dirty tab is shown and asked
+    /// about in turn. Cancel, or a save that does not happen, keeps the window open.
+    fn request_exit(&mut self, hwnd: HWND) {
+        for i in 0..self.tab_count() {
+            if self.tab_editor(i).is_dirty() {
+                self.activate(hwnd, i);
+                if !self.confirm_close_active(hwnd) {
+                    self.after_command(hwnd);
+                    return;
                 }
             }
-            Pending::OpenPath(path) => self.load_path(&path),
         }
+        self.quit = true;
+    }
+
+    /// Writes the paths of the tabs that have one, and the active index, to session.txt. Only
+    /// when restore_tabs is on. Called as the window is about to be destroyed.
+    fn save_session(&self) {
+        use std::fmt::Write as _;
+        if !self.config.restore_tabs {
+            return;
+        }
+        let Some(dir) = app_dir() else {
+            return;
+        };
+        let mut text = String::new();
+        let mut kept = 0usize;
+        let mut active = 0usize;
+        for i in 0..self.tab_count() {
+            if i == self.active {
+                active = kept;
+            }
+            if let Some(path) = &self.tab_editor(i).path {
+                let _ = writeln!(text, "{path}");
+                kept += 1;
+            }
+        }
+        let _ = writeln!(text, "active={}", active.min(kept.saturating_sub(1)));
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("session.txt"), text);
+    }
+
+    /// Replaces the untitled startup tab with the files of the last session. Files that can
+    /// no longer be read are skipped. Only called when no file was given on the command line.
+    fn restore_session(&mut self) {
+        let Some((paths, saved)) = read_session() else {
+            return;
+        };
+        let mut docs = Vec::new();
+        let mut want = None;
+        for (k, path) in paths.iter().enumerate() {
+            if k == saved {
+                want = Some(docs.len());
+            }
+            if let Ok(bytes) = std::fs::read(path) {
+                let mut doc = Editor::new(&self.config);
+                doc.load_owned(path, bytes);
+                docs.push(doc);
+            }
+        }
+        if docs.is_empty() {
+            return;
+        }
+        let idx = want.unwrap_or(0).min(docs.len() - 1);
+        self.editor = std::mem::replace(&mut docs[idx], Editor::new(&self.config));
+        self.tabs = docs;
+        self.active = idx;
     }
 
     fn load_path(&mut self, path: &str) {
@@ -1415,20 +1891,20 @@ impl App {
 
     fn on_drop(&mut self, hwnd: HWND, hdrop: HDROP) {
         // SAFETY: hdrop comes from WM_DROPFILES and is finished exactly once below.
-        let path = unsafe {
-            let n = DragQueryFileW(hdrop, 0, null_mut(), 0);
-            let path = if n > 0 {
-                let mut buf = vec![0u16; n as usize + 1];
-                DragQueryFileW(hdrop, 0, buf.as_mut_ptr(), n + 1);
-                Some(from_wide(&buf))
-            } else {
-                None
-            };
+        let paths = unsafe {
+            let n = DragQueryFileW(hdrop, u32::MAX, null_mut(), 0);
+            let mut paths = Vec::with_capacity(n as usize);
+            for i in 0..n {
+                let len = DragQueryFileW(hdrop, i, null_mut(), 0);
+                let mut buf = vec![0u16; len as usize + 1];
+                DragQueryFileW(hdrop, i, buf.as_mut_ptr(), len + 1);
+                paths.push(from_wide(&buf));
+            }
             DragFinish(hdrop);
-            path
+            paths
         };
-        if let Some(path) = path {
-            self.request(hwnd, Pending::OpenPath(path));
+        if !paths.is_empty() {
+            self.open_paths(hwnd, &paths);
         }
     }
 
@@ -1493,7 +1969,8 @@ impl App {
         let Some(d) = self.sb_drag else {
             return;
         };
-        let (x, y) = point_of(lp);
+        let (x, cy) = point_of(lp);
+        let y = cy - self.tabbar_h();
         let along = if d.axis == Axis::Vert { y } else { x };
         let rel = (along - d.grab - d.origin).clamp(0, d.span) as usize;
         let pos = if d.span > 0 {
@@ -1531,24 +2008,73 @@ impl App {
 
     fn on_mouse_leave(&mut self, hwnd: HWND) {
         self.mouse_in = false;
-        if self.sb_hover.take().is_some() {
+        let hot = self.tab_hot.take().is_some();
+        let bar = self.sb_hover.take().is_some();
+        if hot || bar {
             redraw(hwnd);
         }
     }
 
-    /// Arrow over the bar strips, the I-beam (class cursor) over the text. Returns true when
-    /// the arrow was set.
-    fn on_set_cursor(&self, hwnd: HWND) -> bool {
-        if self.show_help {
-            return false;
-        }
+    /// Pointer position in client pixels, for messages that carry screen coordinates.
+    fn cursor_in_client(hwnd: HWND) -> (i32, i32) {
         let mut pt = POINT { x: 0, y: 0 };
-        // SAFETY: pt is a valid out-parameter; the window handle is the one being painted.
+        // SAFETY: pt is a valid out-parameter and hwnd is a live window.
         unsafe {
             GetCursorPos(&mut pt);
             ScreenToClient(hwnd, &mut pt);
         }
-        if !Self::in_bar_strip(self.layout(), pt.x, pt.y) {
+        (pt.x, pt.y)
+    }
+
+    /// Records the strip item under the pointer and repaints when it changes.
+    fn set_tab_hot(&mut self, hwnd: HWND, hot: Option<TabHit>) {
+        if self.tab_hot != hot {
+            self.tab_hot = hot;
+            redraw(hwnd);
+        }
+    }
+
+    /// Press on the tab strip: shows a tab and starts a reorder drag on it, closes a tab
+    /// through its close box, or opens a tab on "+".
+    fn tab_press(&mut self, hwnd: HWND, x: i32, y: i32) {
+        let Some(strip) = self.tab_strip() else {
+            return;
+        };
+        match strip.hit(x, y) {
+            Some(TabHit::Tab(i)) => {
+                self.activate(hwnd, i);
+                self.tab_drag = true;
+                // SAFETY: released in on_mouse_up.
+                unsafe {
+                    SetCapture(hwnd);
+                }
+            }
+            Some(TabHit::Close(i)) => self.close_tab_checked(hwnd, i),
+            Some(TabHit::New) => self.new_tab(hwnd),
+            None => {}
+        }
+    }
+
+    /// Middle click on a tab closes it.
+    fn on_middle_up(&mut self, hwnd: HWND, lp: LPARAM) {
+        let (x, y) = point_of(lp);
+        let hit = self.tab_strip().and_then(|s| s.hit(x, y));
+        if let Some(i) = hit.and_then(TabHit::tab_index) {
+            self.close_tab_checked(hwnd, i);
+        }
+    }
+
+    /// Arrow over the tab strip and the bar strips, the I-beam (class cursor) over the text.
+    /// Returns true when the arrow was set.
+    fn on_set_cursor(&self, hwnd: HWND) -> bool {
+        let (x, cy) = Self::cursor_in_client(hwnd);
+        let hb = self.tabbar_h();
+        let arrow = if cy < hb {
+            true
+        } else {
+            !self.show_help && Self::in_bar_strip(self.layout(), x, cy - hb)
+        };
+        if !arrow {
             return false;
         }
         // SAFETY: IDC_ARROW is a system cursor, so no module handle is needed.
@@ -1559,7 +2085,13 @@ impl App {
     }
 
     fn on_mouse_down(&mut self, hwnd: HWND, lp: LPARAM) {
-        let (x, y) = point_of(lp);
+        let (x, cy) = point_of(lp);
+        let hb = self.tabbar_h();
+        if cy < hb {
+            self.tab_press(hwnd, x, cy);
+            return;
+        }
+        let y = cy - hb;
         let lay = self.layout();
         if Self::in_bar_strip(lay, x, y) {
             self.bar_press(hwnd, lay, x, y);
@@ -1587,7 +2119,25 @@ impl App {
             // The button went up outside the window, or was never down: end any drag.
             self.on_mouse_up(hwnd);
         }
-        let (x, mut y) = point_of(lp);
+        let (x, cy) = point_of(lp);
+        let hb = self.tabbar_h();
+        if self.tab_drag {
+            if let Some(strip) = self.tab_strip() {
+                self.tab_drag_move(hwnd, strip, x, cy);
+            }
+            return;
+        }
+        // Over the strip, with no text or bar drag under way, the pointer is on the tabs.
+        if cy < hb && !self.drag && self.sb_drag.is_none() {
+            let hot = self.tab_strip().and_then(|s| s.hit(x, cy));
+            self.set_tab_hot(hwnd, hot);
+            if self.sb_hover.take().is_some() {
+                redraw(hwnd);
+            }
+            return;
+        }
+        self.set_tab_hot(hwnd, None);
+        let mut y = cy - hb;
         let lay = self.layout();
         if self.sb_drag.is_some() {
             self.bar_drag(hwnd, lp);
@@ -1615,6 +2165,13 @@ impl App {
     }
 
     fn on_mouse_up(&mut self, hwnd: HWND) {
+        if self.tab_drag {
+            self.tab_drag = false;
+            // SAFETY: the mouse was captured in tab_press.
+            unsafe {
+                ReleaseCapture();
+            }
+        }
         if self.sb_drag.take().is_some() {
             // SAFETY: the mouse was captured in bar_press.
             unsafe {
@@ -1632,7 +2189,16 @@ impl App {
     }
 
     fn on_double_click(&mut self, hwnd: HWND, lp: LPARAM) {
-        let (x, y) = point_of(lp);
+        let (x, cy) = point_of(lp);
+        let hb = self.tabbar_h();
+        if cy < hb {
+            // Empty strip space opens a tab. On a tab or on "+" the press already did the work.
+            if self.tab_strip().and_then(|s| s.hit(x, cy)).is_none() {
+                self.new_tab(hwnd);
+            }
+            return;
+        }
+        let y = cy - hb;
         let lay = self.layout();
         // The second press of a double click arrives as this message, so the bars page
         // again on it, as a second click would.
@@ -1662,6 +2228,19 @@ impl App {
 
     fn on_wheel(&mut self, hwnd: HWND, wp: WPARAM) {
         let delta = wheel_delta(wp);
+        // Over the tab strip the wheel steps through the tabs: up is the previous tab.
+        let (_, cy) = Self::cursor_in_client(hwnd);
+        if (0..self.tabbar_h()).contains(&cy) {
+            self.wheel_t += delta;
+            let notches = self.wheel_t / WHEEL_DELTA as i32;
+            self.wheel_t %= WHEEL_DELTA as i32;
+            if notches != 0 {
+                let n = self.tab_count() as isize;
+                let i = (self.active as isize - notches as isize).rem_euclid(n) as usize;
+                self.activate(hwnd, i);
+            }
+            return;
+        }
         // Ctrl+wheel zooms, one step per full notch (precision touchpads send small deltas).
         if wp & MK_CONTROL_FLAG != 0 {
             self.wheel_z += delta;
@@ -1729,11 +2308,13 @@ fn redraw(hwnd: HWND) {
 fn caret_rect(app: &App) -> Option<RECT> {
     let lay = app.layout();
     let (x, y) = render::caret_spot(app, lay)?;
+    // The spot is in editor coordinates; the rectangle goes to the window, below the strip.
+    let top = y + lay.tabbar_h;
     Some(RECT {
         left: x,
-        top: y,
+        top,
         right: x + app.config.caret_width.max(1),
-        bottom: y + lay.lh,
+        bottom: top + lay.lh,
     })
 }
 
