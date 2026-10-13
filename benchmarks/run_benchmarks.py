@@ -367,14 +367,30 @@ def memprobe_run(scenario, file_label, *extra):
     return rec
 
 
-def time_cmd(cmd, runs=5, discard=False):
+def run_checked(cmd, ok=(0,), **kwargs):
+    """Runs cmd. An exit status outside `ok` is an error, and it is raised."""
+    proc = subprocess.run(cmd, **kwargs)
+    if proc.returncode not in ok:
+        err = proc.stderr or b""
+        err = err if isinstance(err, str) else err.decode("utf-8", "replace")
+        raise RuntimeError(f"{cmd[0]} exited {proc.returncode}: {err[-500:]}")
+    return proc
+
+
+def rg_count(cmd):
+    """ripgrep's match count. Its exit status 1 means no match, which is a count of zero."""
+    out = run_checked(cmd, ok=(0, 1), capture_output=True, text=True).stdout.strip()
+    return int(out or 0)
+
+
+def time_cmd(cmd, runs=5, discard=False, ok=(0,)):
     times = []
     for _ in range(runs):
         t0 = time.perf_counter()
         if discard:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            run_checked(cmd, ok, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            subprocess.run(cmd, capture_output=True, check=True)
+            run_checked(cmd, ok, capture_output=True)
         times.append(time.perf_counter() - t0)
     return {"median_s": statistics.median(times), "min_s": min(times), "max_s": max(times), "runs": runs}
 
@@ -392,13 +408,13 @@ def comparisons(suite_records):
     for label, flags, pattern in FIND_ALL:
         rg = ["rg", "--no-config", "--no-messages", "--count-matches", "--no-filename", *flags, "--", pattern, str(big)]
         rg1 = ["rg", "--no-config", "--no-messages", "--count-matches", "--no-filename", "-j1", *flags, "--", pattern, str(big)]
-        count = int(subprocess.run(rg, capture_output=True, text=True, check=True).stdout.strip())
+        count = rg_count(rg)
         entry = {
             "label": label,
             "rg_matches": count,
             "note_matches": note_counts.get(label),
-            "rg_threads_s": time_cmd(rg, runs=5),
-            "rg_single_thread_s": time_cmd(rg1, runs=5),
+            "rg_threads_s": time_cmd(rg, runs=5, ok=(0, 1)),
+            "rg_single_thread_s": time_cmd(rg1, runs=5, ok=(0, 1)),
         }
         result["find_all"].append(entry)
         log(f"  rg '{label}': {count} matches, {entry['rg_threads_s']['median_s']:.3f}s")

@@ -274,8 +274,10 @@ def py_module(t, target):
     return w.text()
 
 
-RS_TYPES = ["u32", "usize", "i64", "f64", "bool", "String", "Vec<u8>", "Option<usize>", "&str", "PathBuf"]
-RS_RETURNS = [" -> ()", " -> bool", " -> Result<(), Error>", " -> Option<usize>", " -> Self", " -> String"]
+RS_TYPES = ["u32", "usize", "i64", "f64", "bool", "String", "Vec<u8>", "Option<usize>", "&str", "PathBuf",
+            "Box<dyn std::error::Error>"]
+RS_RETURNS = [" -> ()", " -> bool", " -> Result<(), Error>", " -> Option<usize>", " -> Self", " -> String",
+              " -> Result<(), Box<dyn std::error::Error>>"]
 
 
 def rs_body(t, w, depth, n):
@@ -314,6 +316,10 @@ def rs_body(t, w, depth, n):
             w.add(f"{pad}let {t.ident()} = |{t.ident()}| {t.ident()} + {c.n(9)};")
         elif k < 90:
             w.add(f"{pad}// {t.sentence()}")
+        elif k == 99 and c.p(0.5):
+            w.add(f"{pad}unsafe {{ {t.ident()}({t.expr(1)}) }}")
+        elif k == 98 and c.p(0.5):
+            w.add(f"{pad}let {t.ident()} = {t.ident()}({t.expr(1)}).await?;")
         else:
             w.add(f"{pad}return {t.expr(1)};")
 
@@ -325,7 +331,7 @@ def rs_fn(t, w, depth):
     if depth:
         params.insert(0, "&self")
     w.add(f"{pad}/// {t.sentence()}")
-    w.add(f"{pad}pub fn {t.ident()}({', '.join(params)}){c.pick(RS_RETURNS)} {{")
+    w.add(f"{pad}pub {'async ' if c.p(0.04) else ''}fn {t.ident()}({', '.join(params)}){c.pick(RS_RETURNS)} {{")
     rs_body(t, w, depth + 1, c.between(3, 10))
     w.add(f"{pad}}}")
 

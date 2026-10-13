@@ -4,56 +4,56 @@
   "python": "3.13.16",
   "files": {
     "mixed-1m.txt": {
-      "bytes": 1048547,
-      "sha256": "6621cddf1be2b2258c207e8994ddc7e021b348f7563248cb9c736bc80f8afc7f",
+      "bytes": 1048567,
+      "sha256": "1b0e7c0c6f1617f54615c9390d2d4f63ff31cc06eff2dcd48714711af1ed4a58",
       "stats": {
-        "lines": 28975,
-        "avg_line_bytes": 36.2,
-        "blank_pct": 12.6,
-        "comment_pct": 9.2,
-        "nonascii_pct": 0.05,
-        "longest_line": 338
+        "lines": 33957,
+        "avg_line_bytes": 30.9,
+        "blank_pct": 12.7,
+        "comment_pct": 9.5,
+        "nonascii_pct": 0.04,
+        "longest_line": 350
       }
     },
     "mixed-10m.txt": {
-      "bytes": 10485754,
-      "sha256": "061c5b599e35d03118e59757175f4765587c4e14496661b3948f399da56cf68f",
+      "bytes": 10485719,
+      "sha256": "b37207447d4c9d99e551821afc75098a8d8a72ff339c6ef1ad5adf8f342794ad",
       "stats": {
-        "lines": 288882,
-        "avg_line_bytes": 36.3,
+        "lines": 307719,
+        "avg_line_bytes": 34.1,
         "blank_pct": 13.8,
-        "comment_pct": 7.6,
+        "comment_pct": 7.4,
         "nonascii_pct": 0.05,
-        "longest_line": 381
+        "longest_line": 392
       }
     },
     "mixed-100m.txt": {
-      "bytes": 104857600,
-      "sha256": "121615cf8cd5a1f2284fad36e41cc079ce30885470c970900d1cf02a6f86e26a",
+      "bytes": 104857576,
+      "sha256": "222732acb1966620c10d40627cb2e6bc687f9b6db5761f9f5e631ca4dc07498b",
       "stats": {
-        "lines": 2891178,
-        "avg_line_bytes": 36.3,
-        "blank_pct": 14.2,
-        "comment_pct": 7.3,
+        "lines": 2908022,
+        "avg_line_bytes": 36.1,
+        "blank_pct": 14.0,
+        "comment_pct": 7.4,
         "nonascii_pct": 0.05,
-        "longest_line": 402
+        "longest_line": 406
       }
     },
     "mixed-100m-crlf.txt": {
-      "bytes": 107748778,
-      "sha256": "f9bda4f9044c8248b1b23a75039bd2c44d7fed7a1d3f70b02ade4086a69a40b2"
+      "bytes": 107765598,
+      "sha256": "7be8a9f076b6c7159f20efc31a6ee7f74775c4e20bb7baae01182229079638c7"
     },
     "mixed-100m-bom.txt": {
-      "bytes": 104857603,
-      "sha256": "94c9cdfbb448ae3bc875a214e939932544926f39bda4da00639a9eaa8e24296e"
+      "bytes": 104857579,
+      "sha256": "9e64a5e9f5ce6d8c849345aa68b32da39698d95f38eea0f15cd82c553e5b1797"
     },
     "mixed-100m-utf16le.txt": {
-      "bytes": 209658742,
-      "sha256": "ca2fac0c09b4b1dd6f41184b92d9285f3dc84c4fb4026ce97f29522eebe7aeb1"
+      "bytes": 209659298,
+      "sha256": "1f1fe0be4b621d8e68b40197af9e9214401534a60299daaaed9a290fd12c3449"
     },
     "mixed-100m-latin1.txt": {
-      "bytes": 104829370,
-      "sha256": "f52377656aeba9a74154e8793d2c5acacd541b083e5527ea912264c42558300a"
+      "bytes": 104829648,
+      "sha256": "33098c52b4d73f4fbf032c38ba30407a369346decf03a7da6bc98aa73ff860bc"
     },
     "c-headers.h": {
       "bytes": 36700218,
@@ -80,15 +80,15 @@
       }
     },
     "rust.rs": {
-      "bytes": 22020111,
-      "sha256": "d35d88bfda71da7e53360223b2e93576d95fc2f0f11a8dd993ebf56463cc0bdd",
+      "bytes": 22020432,
+      "sha256": "0bc22ef4ddb862be730a9dcc541d34d1240b91d393dca7875ba98ff7a97bdf70",
       "stats": {
-        "lines": 641083,
-        "avg_line_bytes": 34.3,
+        "lines": 631793,
+        "avg_line_bytes": 34.9,
         "blank_pct": 4.0,
         "comment_pct": 7.6,
         "nonascii_pct": 0.02,
-        "longest_line": 154
+        "longest_line": 203
       }
     }
   }
