@@ -3,7 +3,8 @@
 ; Build (the -D options are required; -WX makes warnings fail the build):
 ;   makensis -WX -DVERSION=0.1.0 -DEXE=path/to/note.exe -DOUTFILE=path/to/setup.exe installer/note.nsi
 ; Windows makensis also accepts /D and /WX. Paths are relative to this file's folder, because
-; makensis changes into it unless -NOCD is given.
+; makensis changes into it unless -NOCD is given. Relative paths use backslashes: Windows
+; makensis's File command only splits paths on '\' (POSIX makensis converts them).
 ;
 ; Silent:    setup.exe /S [/CurrentUser | /AllUsers] [/D=<install dir>]
 ; Uninstall: "<install dir>\uninstall.exe" /S [/CurrentUser | /AllUsers]
@@ -45,8 +46,8 @@ ManifestDPIAware true
 !define PATH_LM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 
 ; Installer and uninstaller icon (resource ID 1 of the exe is the same icon).
-!define MUI_ICON "../assets/icon/note.ico"
-!define MUI_UNICON "../assets/icon/note.ico"
+!define MUI_ICON "..\assets\icon\note.ico"
+!define MUI_UNICON "..\assets\icon\note.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APPEXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Run ${APPNAME}"
@@ -83,7 +84,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "MIT"
 
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "../LICENSE"
+!insertmacro MUI_PAGE_LICENSE "..\LICENSE"
 !insertmacro MULTIUSER_PAGE_INSTALLMODE
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
@@ -344,9 +345,9 @@ Section "${APPNAME}" SecApp
 
   SetOutPath "$INSTDIR"
   File "/oname=${APPEXE}" "${EXE}"
-  File "/oname=LICENSE" "../LICENSE"
+  File "/oname=LICENSE" "..\LICENSE"
   SetOutPath "$INSTDIR\licenses"
-  File "/oname=PaperMono-OFL.txt" "../assets/fonts/OFL.txt"
+  File "/oname=PaperMono-OFL.txt" "..\assets\fonts\OFL.txt"
   SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
