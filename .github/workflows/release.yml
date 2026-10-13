@@ -67,7 +67,7 @@ jobs:
           }
 
           if [[ "$REF_TYPE" != "branch" ]]; then
-            echo "::error::Dispatch this workflow from a branch. The release commit is pushed back to that branch." >&2
+            echo "::error::Dispatch this workflow from a branch. The release commit is pushed back to that branch (only after the build succeeds)." >&2
             exit 1
           fi
 
@@ -136,7 +136,7 @@ jobs:
 
           {
             printf '%s\n\n' '## Install'
-            printf -- '- **Setup (recommended):** `note-%s-setup-x86_64.exe`. Installs for your user account with no admin rights, and offers Start menu, Explorer and Open with entries.\n' "$TAG"
+            printf -- '- **Setup (recommended):** `note-%s-setup-x86_64.exe`. Installs for your user account with no admin rights, and offers Start menu, Explorer and Open with entries. Requires 64-bit Windows.\n' "$TAG"
             printf -- '- **Portable:** `note-%s-x86_64-windows.exe`. A single exe with no installation. Copy it anywhere and run it.\n\n' "$TAG"
             printf '%s\n\n' "$HEADER"
             count=0
@@ -156,56 +156,6 @@ jobs:
 
           cat "$NOTES"
 
-      - name: Set version in Cargo.toml
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          # Only the first "version = " line, which is the one in [package].
-          sed -i "0,/^version = /{s/^version = \"[^\"]*\"/version = \"${VERSION}\"/}" Cargo.toml
-
-          expected="version = \"${VERSION}\""
-          actual="$(grep -m1 '^version = ' Cargo.toml)"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::Cargo.toml has '$actual', expected '$expected'" >&2
-            exit 1
-          fi
-
-      - name: Update Cargo.lock
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ -n "$(git ls-files Cargo.lock)" ]]; then
-            cargo update -p note --offline || cargo generate-lockfile
-
-            locked="$(sed -n '/^name = "note"$/{n;p}' Cargo.lock)"
-            if [[ "$locked" != "version = \"${VERSION}\"" ]]; then
-              echo "::error::Cargo.lock has '$locked', expected version ${VERSION}" >&2
-              exit 1
-            fi
-          fi
-
-      - name: Commit, tag and push
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
-          BRANCH: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          bot=(git -c user.name="github-actions[bot]" \
-                   -c user.email="41898099+github-actions[bot]@users.noreply.github.com")
-
-          git add Cargo.toml
-          if [[ -n "$(git ls-files Cargo.lock)" ]]; then
-            git add Cargo.lock
-          fi
-          # --allow-empty: the first patch release may leave Cargo.toml unchanged.
-          "${bot[@]}" commit --allow-empty -m "Release $TAG"
-          "${bot[@]}" tag -a "$TAG" -m "Release $TAG"
-
-          git push origin "HEAD:refs/heads/${BRANCH}"
-          git push origin "refs/tags/${TAG}"
-
       - name: Upload release notes
         uses: actions/upload-artifact@v4
         with:
@@ -221,9 +171,11 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
+      # The exact commit that was dispatched. Nothing has been pushed yet: the release commit
+      # and tag are only created by the release job, after this build succeeds.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -232,7 +184,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release
+          # Same edit the release commit makes, so the exe's version resource matches the tag.
+          bash scripts/set-version.sh "$VERSION"
+          cargo build --release --locked
 
       - name: Ensure makensis (NSIS) is available
         shell: pwsh
@@ -260,10 +214,11 @@ jobs:
           $setup = "note-${env:TAG}-setup-x86_64.exe"
           Copy-Item -LiteralPath 'target/release/note.exe' -Destination $exe
 
-          # -WX: a compiler warning fails the build. NSIS takes absolute paths for the exe and output.
+          # Warnings are printed but do not fail the release (the runner's NSIS version can be
+          # newer than the one the script was checked with). NSIS takes absolute paths here.
           $exeAbs = Join-Path $PWD 'target\release\note.exe'
           $setupAbs = Join-Path $PWD $setup
-          makensis -WX -V3 "-DVERSION=$env:VERSION" "-DEXE=$exeAbs" "-DOUTFILE=$setupAbs" installer\note.nsi
+          makensis -V3 "-DVERSION=$env:VERSION" "-DEXE=$exeAbs" "-DOUTFILE=$setupAbs" installer\note.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 
           # Same format as sha256sum: lowercase hex, two spaces, file name, LF, no BOM.
@@ -295,6 +250,29 @@ jobs:
       PRERELEASE: ${{ inputs.prerelease }}
       DRAFT: ${{ inputs.draft }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Commit, tag and push
+        # Runs only after the build succeeded, so a failed build leaves no tag or commit behind.
+        # If the branch moved since the dispatch, the push is rejected and nothing is tagged.
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/set-version.sh "$VERSION"
+          bot=(git -c user.name="github-actions[bot]" \
+                   -c user.email="41898099+github-actions[bot]@users.noreply.github.com")
+          git add Cargo.toml Cargo.lock
+          # --allow-empty: the first patch release may leave Cargo.toml unchanged.
+          "${bot[@]}" commit --allow-empty -m "Release $TAG"
+          "${bot[@]}" tag -a "$TAG" -m "Release $TAG"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          git push origin "refs/tags/${TAG}"
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts # one sub-directory per artifact name

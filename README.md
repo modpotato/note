@@ -236,13 +236,17 @@ from the Actions tab, on the branch to release from.
 - `prerelease`: marks the GitHub release as a pre-release.
 - `draft`: creates the release as a draft, to review before publishing.
 
-The workflow runs `cargo test --release`, sets `version` in `Cargo.toml`, and commits
-`Release vX.Y.Z` to the branch. It then creates an annotated tag, builds the portable exe
-`note-vX.Y.Z-x86_64-windows.exe` and the setup program `note-vX.Y.Z-setup-x86_64.exe`, and
-publishes both with `SHA256SUMS.txt` and a changelog of the commits since the previous tag.
-The release notes start with an Install section that names both files. If `makensis` is not
-on the Windows runner, the workflow installs NSIS with Chocolatey first. If there is no tag yet, a patch release publishes the
-version in `Cargo.toml` as it is, and a minor or major release bumps it.
+The workflow runs `cargo test --release`, then builds the portable exe
+`note-vX.Y.Z-x86_64-windows.exe` and the setup program `note-vX.Y.Z-setup-x86_64.exe` with
+the new version applied (`scripts/set-version.sh`). Only after the build succeeds does it
+commit `Release vX.Y.Z` to the branch, create the annotated tag and publish both files with
+`SHA256SUMS.txt` and a changelog of the commits since the previous tag, so a failed build
+leaves no tag or release commit behind. If the branch moved while the workflow ran, the push
+is rejected and nothing is tagged. The release notes start with an Install section that
+names both files. If `makensis` is not on the Windows runner, the workflow installs NSIS with
+Chocolatey first. The setup program is a 32-bit NSIS installer (official NSIS builds ship
+only x86 stubs) that installs the 64-bit exe. If there is no tag yet, a patch release
+publishes the version in `Cargo.toml` as it is, and a minor or major release bumps it.
 
 ## Known limitations
 
