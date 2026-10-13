@@ -37,12 +37,12 @@ const HINTS: [(Action, &str); 12] = [
     (Action::Open, "Open"),
     (Action::Find, "Find"),
     (Action::Replace, "Replace"),
-    (Action::CutLine, "Cut"),
-    (Action::Paste, "Paste"),
     (Action::GotoLine, "Goto"),
     (Action::Undo, "Undo"),
     (Action::Redo, "Redo"),
-    (Action::MarkToggle, "Mark"),
+    (Action::CutLine, "Cut Line"),
+    (Action::DuplicateLine, "Duplicate"),
+    (Action::ToggleComment, "Comment"),
     (Action::Exit, "Exit"),
 ];
 /// Source for ETO_OPAQUE fills, which need an empty string.
@@ -526,7 +526,7 @@ impl Renderer {
         self.tmp = left;
     }
 
-    /// Two rows of nano-style "KEY Label" pairs.
+    /// Two rows of "KEY Label" pairs.
     fn draw_hints(&mut self, cfg: &Config, lay: Layout) {
         let mem = self.mem;
         let theme = &cfg.theme;

@@ -1,13 +1,15 @@
 # note
 
-An ultra-light Notepad replacement for Windows. Pure Win32 and GDI, dark by default, nano
-key bindings, and no tabs, menus or frameworks. The release executable is about 730 KB (font,
+An ultra-light Notepad replacement for Windows. Pure Win32 and GDI, dark by default, the
+usual Notepad keys plus a few line-editing extras, and no tabs, menus or frameworks. The release executable is about 730 KB (font,
 icon and C runtime included); the installer is about 460 KB.
 
 - **Pure Win32 / GDI.** One window, one document, a double-buffered GDI renderer that paints
   only the visible lines.
 - **Dark theme.** Every colour is configurable; a light palette is built in.
-- **Nano key bindings.** `^O` saves, `^X` exits, `^G` shows the full key list.
+- **Notepad keys, plus extras.** `Ctrl+S`, `Ctrl+A`, `Ctrl+C`/`V`/`X`, `Ctrl+Z`/`Y`, `Ctrl+F`,
+  `Ctrl+H` and `Ctrl+G` work as in Notepad. On top of that, `Ctrl+K` cuts the line, `Ctrl+D`
+  duplicates it and `Alt+Up`/`Alt+Down` move it. `F1` lists every key.
 - **SIMD.** Byte scans (newline counting, search, line endings, ASCII checks) use SSE2 and
   AVX2, with AVX2 chosen at runtime.
 - **Syntax highlighting** for about 20 languages, computed incrementally.
@@ -77,60 +79,71 @@ note [file]
 Pass a file to open it. You can also drag a file onto the window. Without a file, the editor
 opens an untitled document. Saving an untitled document asks for a name.
 
+In the Save As dialog, "Text Documents (*.txt)" adds `.txt` to a name typed without an
+extension: `notes` saves as `notes.txt`, while `notes.md` saves as `notes.md`. Switch the
+type to "All Files (*.*)" to save the name exactly as typed, or end the name with a dot
+(`notes.`) to save it with no extension. Untitled documents and `.txt` files start on "Text
+Documents"; other files start on "All Files", so Save As on `LICENSE` keeps that name.
+
 Files are decoded on load and written back in the same encoding and line ending they had:
 UTF-8 (with or without BOM), UTF-16 LE/BE, or ANSI (Latin-1) for files that are not valid
 UTF-8. CRLF and LF are both preserved.
 
 ## Key bindings
 
-Chords use nano notation: `^` is Ctrl, `M-` is Alt, `S-` is Shift. The table lists every
+Chords are written short: `^` is Ctrl, `M-` is Alt, `S-` is Shift. The table lists every
 action in the default keymap with all of its chords. Action names are the ones used in
-`[keys]` in the config file.
+`[keys]` in the config file, so any of them can be moved or removed there.
 
 | Action | Chords |
 | --- | --- |
-| `save` | `^O` `^S` |
+| `save` | `^S` |
 | `save_as` | `^S-S` |
-| `open` | `^R` |
+| `open` | `^O` |
 | `new` | `^N` |
-| `exit` | `^X` |
+| `exit` | `^Q` `^W` (and `Alt+F4`) |
+| `undo` | `^Z` |
+| `redo` | `^Y` `^S-Z` |
+| `cut` | `^X` `S-Del` |
+| `copy` | `^C` `^Ins` |
+| `paste` | `^V` `S-Ins` |
+| `select_all` | `^A` |
 | `cut_line` | `^K` |
-| `paste` | `^U` `S-Ins` |
-| `copy` | `M-6` `^Ins` |
-| `cut` | `S-Del` |
-| `find` | `^W` `^F` |
-| `find_next` | `M-W` `F3` |
-| `find_prev` | `M-Q` `S-F3` |
-| `replace` | `^\` `^H` |
-| `goto_line` | `^_` `^L` |
-| `show_position` | `^C` |
-| `help` | `^G` `F1` |
-| `undo` | `M-U` `^Z` |
-| `redo` | `M-E` `^S-Z` |
-| `select_all` | `^S-A` |
-| `line_home` | `^A` |
-| `line_end` | `^E` |
-| `page_up` | `^Y` |
-| `page_down` | `^V` |
-| `doc_start` | `M-\` `^Home` |
-| `doc_end` | `M-/` `^End` |
-| `word_left` | `^Left` |
-| `word_right` | `^Right` |
+| `duplicate_line` | `^D` |
+| `toggle_comment` | `^/` |
+| `move_line_up` | `M-Up` |
+| `move_line_down` | `M-Down` |
+| `indent` | `Tab` |
+| `unindent` | `S-Tab` |
 | `delete_word_left` | `^Backspace` |
 | `delete_word_right` | `^Del` |
-| `toggle_line_numbers` | `M-N` |
-| `toggle_wrap` | `M-L` |
-| `toggle_hints` | `M-X` |
+| `mark_toggle` | `M-A` |
+| `find` | `^F` |
+| `find_next` | `F3` |
+| `find_prev` | `S-F3` |
+| `replace` | `^H` |
+| `goto_line` | `^G` |
+| `line_home` | `Home` |
+| `line_end` | `End` |
+| `page_up` | `PgUp` |
+| `page_down` | `PgDn` |
+| `doc_start` | `^Home` |
+| `doc_end` | `^End` |
+| `word_left` | `^Left` |
+| `word_right` | `^Right` |
 | `zoom_in` | `^+` |
 | `zoom_out` | `^-` |
 | `zoom_reset` | `^0` |
-| `indent` | `Tab` |
-| `unindent` | `S-Tab` |
-| `duplicate_line` | `^D` |
-| `mark_toggle` | `^6` `M-A` |
-| `toggle_comment` | `M-3` |
-| `move_line_up` | `M-Up` |
-| `move_line_down` | `M-Down` |
+| `toggle_wrap` | `M-Z` |
+| `toggle_line_numbers` | `M-N` |
+| `toggle_hints` | `M-X` |
+| `show_position` | `M-C` |
+| `help` | `F1` |
+
+Shift with the arrows, `Home`, `End`, `PgUp`, `PgDn`, `^Home`, `^End`, `^Left` and `^Right`
+extends the selection. `^K` without a selection cuts the whole line; pressing it again
+appends the next line to the same clipboard text, so `^K ^K ^K` then `^V` moves three lines.
+`M-A` starts a mark: every movement extends the selection until you press it again or `Esc`.
 
 ## Configuration
 

@@ -1,4 +1,4 @@
-//! INI configuration, colour themes, key chords and the nano-style keymap.
+//! INI configuration, colour themes, key chords and the default keymap.
 //!
 //! Pure std and platform independent. The `VK_*` codes are Win32 virtual-key
 //! numbering, defined locally so this module builds and tests on any host.
@@ -496,64 +496,62 @@ const fn ch(vk: u16, mods: u8) -> Chord {
     }
 }
 
-/// Default nano keymap. The first binding for an action is the one shown in the hint bar.
-const NANO: &[(Chord, Action)] = &[
-    (ch(b'O' as u16, CTRL), Action::Save),
+/// Default keymap: the usual Windows Notepad keys plus a few editor extras (Ctrl+K cuts the
+/// line, Ctrl+D duplicates it, Alt+Up/Down moves it). The first binding for an action is the
+/// one shown in the hint bar.
+const DEFAULT_KEYS: &[(Chord, Action)] = &[
+    // File
     (ch(b'S' as u16, CTRL), Action::Save),
-    (ch(b'X' as u16, CTRL), Action::Exit),
-    (ch(b'R' as u16, CTRL), Action::Open),
-    (ch(b'K' as u16, CTRL), Action::CutLine),
-    (ch(b'U' as u16, CTRL), Action::Paste),
-    (ch(b'W' as u16, CTRL), Action::Find),
-    (ch(b'F' as u16, CTRL), Action::Find),
-    (ch(VK_OEM_5, CTRL), Action::Replace),
-    (ch(b'H' as u16, CTRL), Action::Replace),
-    (ch(VK_OEM_MINUS, CTRL | SHIFT), Action::GotoLine),
-    (ch(b'L' as u16, CTRL), Action::GotoLine),
-    (ch(b'G' as u16, CTRL), Action::Help),
-    (ch(VK_F1, 0), Action::Help),
-    (ch(b'C' as u16, CTRL), Action::ShowPosition),
-    (ch(b'A' as u16, CTRL), Action::LineHome),
-    (ch(b'E' as u16, CTRL), Action::LineEnd),
-    (ch(b'Y' as u16, CTRL), Action::PageUp),
-    (ch(b'V' as u16, CTRL), Action::PageDown),
-    (ch(b'U' as u16, ALT), Action::Undo),
-    (ch(b'Z' as u16, CTRL), Action::Undo),
-    (ch(b'E' as u16, ALT), Action::Redo),
-    (ch(b'Z' as u16, CTRL | SHIFT), Action::Redo),
-    (ch(b'W' as u16, ALT), Action::FindNext),
-    (ch(VK_F1 + 2, 0), Action::FindNext),
-    (ch(b'Q' as u16, ALT), Action::FindPrev),
-    (ch(VK_F1 + 2, SHIFT), Action::FindPrev),
-    (ch(b'6' as u16, CTRL), Action::MarkToggle),
-    (ch(b'A' as u16, ALT), Action::MarkToggle),
-    (ch(b'6' as u16, ALT), Action::Copy),
-    (ch(VK_INSERT, CTRL), Action::Copy),
-    (ch(VK_DELETE, SHIFT), Action::Cut),
-    (ch(VK_INSERT, SHIFT), Action::Paste),
-    (ch(b'N' as u16, CTRL), Action::New),
     (ch(b'S' as u16, CTRL | SHIFT), Action::SaveAs),
-    (ch(VK_OEM_5, ALT), Action::DocStart),
+    (ch(b'O' as u16, CTRL), Action::Open),
+    (ch(b'N' as u16, CTRL), Action::New),
+    (ch(b'Q' as u16, CTRL), Action::Exit),
+    (ch(b'W' as u16, CTRL), Action::Exit),
+    // Edit
+    (ch(b'Z' as u16, CTRL), Action::Undo),
+    (ch(b'Y' as u16, CTRL), Action::Redo),
+    (ch(b'Z' as u16, CTRL | SHIFT), Action::Redo),
+    (ch(b'X' as u16, CTRL), Action::Cut),
+    (ch(VK_DELETE, SHIFT), Action::Cut),
+    (ch(b'C' as u16, CTRL), Action::Copy),
+    (ch(VK_INSERT, CTRL), Action::Copy),
+    (ch(b'V' as u16, CTRL), Action::Paste),
+    (ch(VK_INSERT, SHIFT), Action::Paste),
+    (ch(b'A' as u16, CTRL), Action::SelectAll),
+    (ch(b'K' as u16, CTRL), Action::CutLine),
+    (ch(b'D' as u16, CTRL), Action::DuplicateLine),
+    (ch(VK_OEM_2, CTRL), Action::ToggleComment),
+    (ch(VK_UP, ALT), Action::MoveLineUp),
+    (ch(VK_DOWN, ALT), Action::MoveLineDown),
+    (ch(VK_TAB, 0), Action::Indent),
+    (ch(VK_TAB, SHIFT), Action::Unindent),
+    (ch(VK_BACK, CTRL), Action::DeleteWordLeft),
+    (ch(VK_DELETE, CTRL), Action::DeleteWordRight),
+    (ch(b'A' as u16, ALT), Action::MarkToggle),
+    // Search
+    (ch(b'F' as u16, CTRL), Action::Find),
+    (ch(VK_F1 + 2, 0), Action::FindNext),
+    (ch(VK_F1 + 2, SHIFT), Action::FindPrev),
+    (ch(b'H' as u16, CTRL), Action::Replace),
+    (ch(b'G' as u16, CTRL), Action::GotoLine),
+    // Movement. Shift+key extends the selection without a binding of its own.
+    (ch(VK_HOME, 0), Action::LineHome),
+    (ch(VK_END, 0), Action::LineEnd),
+    (ch(VK_PRIOR, 0), Action::PageUp),
+    (ch(VK_NEXT, 0), Action::PageDown),
     (ch(VK_HOME, CTRL), Action::DocStart),
-    (ch(VK_OEM_2, ALT), Action::DocEnd),
     (ch(VK_END, CTRL), Action::DocEnd),
     (ch(VK_LEFT, CTRL), Action::WordLeft),
     (ch(VK_RIGHT, CTRL), Action::WordRight),
-    (ch(VK_BACK, CTRL), Action::DeleteWordLeft),
-    (ch(VK_DELETE, CTRL), Action::DeleteWordRight),
-    (ch(b'N' as u16, ALT), Action::ToggleLineNumbers),
-    (ch(b'L' as u16, ALT), Action::ToggleWrap),
-    (ch(b'X' as u16, ALT), Action::ToggleHints),
+    // View
     (ch(VK_OEM_PLUS, CTRL), Action::ZoomIn),
     (ch(VK_OEM_MINUS, CTRL), Action::ZoomOut),
     (ch(b'0' as u16, CTRL), Action::ZoomReset),
-    (ch(VK_TAB, 0), Action::Indent),
-    (ch(VK_TAB, SHIFT), Action::Unindent),
-    (ch(b'3' as u16, ALT), Action::ToggleComment),
-    (ch(VK_UP, ALT), Action::MoveLineUp),
-    (ch(VK_DOWN, ALT), Action::MoveLineDown),
-    (ch(b'D' as u16, CTRL), Action::DuplicateLine),
-    (ch(b'A' as u16, CTRL | SHIFT), Action::SelectAll),
+    (ch(b'Z' as u16, ALT), Action::ToggleWrap),
+    (ch(b'N' as u16, ALT), Action::ToggleLineNumbers),
+    (ch(b'X' as u16, ALT), Action::ToggleHints),
+    (ch(b'C' as u16, ALT), Action::ShowPosition),
+    (ch(VK_F1, 0), Action::Help),
 ];
 
 /// Key bindings. Linear scan, which is fine for a few dozen entries.
@@ -563,10 +561,10 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// The default nano-style keymap.
-    pub fn nano() -> Keymap {
+    /// The default keymap.
+    pub fn standard() -> Keymap {
         Keymap {
-            binds: NANO.to_vec(),
+            binds: DEFAULT_KEYS.to_vec(),
         }
     }
 
@@ -652,7 +650,7 @@ impl Default for Config {
             auto_indent: true,
             caret_width: 2,
             theme: Theme::dark(),
-            keymap: Keymap::nano(),
+            keymap: Keymap::standard(),
         }
     }
 }
@@ -731,7 +729,7 @@ impl Config {
         s.push_str("\n[keys]\n");
         s.push_str("; chord = action   binds a key.   chord = none   removes a default key.\n");
         s.push_str("; Default bindings (nano notation, see the header):\n");
-        for (chord, action) in &Keymap::nano().binds {
+        for (chord, action) in &Keymap::standard().binds {
             s.push_str(&format!("; {:<12} = {}\n", chord.display(), action.name()));
         }
         s.push_str("; Action names:\n");
@@ -953,7 +951,7 @@ insert_spaces = false
 line_numbers = true
 ; Wrap long lines instead of scrolling sideways. Default: false
 word_wrap = false
-; Show the two-row nano shortcut bar. Default: false (Alt+X toggles)
+; Show the two-row shortcut bar. Default: false (Alt+X toggles)
 show_hints = false
 ; Subtle background behind the caret's line. Default: true
 highlight_current_line = true
@@ -1171,7 +1169,7 @@ mod tests {
 
     #[test]
     fn every_default_binding_round_trips_and_is_unique() {
-        let keymap = Keymap::nano();
+        let keymap = Keymap::standard();
         let mut seen = HashSet::new();
         for (chord, _) in &keymap.binds {
             assert_eq!(Chord::parse(&chord.display()), Some(*chord));
@@ -1181,7 +1179,7 @@ mod tests {
                 chord.display()
             );
         }
-        assert_eq!(seen.len(), NANO.len());
+        assert_eq!(seen.len(), DEFAULT_KEYS.len());
     }
 
     // ---- actions ----
@@ -1208,65 +1206,56 @@ mod tests {
     // ---- keymap ----
 
     #[test]
-    fn nano_keymap_implements_default_table() {
-        let k = Keymap::nano();
+    fn default_keymap_implements_default_table() {
+        let k = Keymap::standard();
         let expect = [
-            ("ctrl+o", Action::Save),
             ("ctrl+s", Action::Save),
-            ("ctrl+x", Action::Exit),
-            ("ctrl+r", Action::Open),
-            ("ctrl+k", Action::CutLine),
-            ("ctrl+u", Action::Paste),
-            ("ctrl+w", Action::Find),
-            ("ctrl+f", Action::Find),
-            ("ctrl+\\", Action::Replace),
-            ("ctrl+h", Action::Replace),
-            ("ctrl+_", Action::GotoLine),
-            ("ctrl+l", Action::GotoLine),
-            ("ctrl+g", Action::Help),
-            ("f1", Action::Help),
-            ("ctrl+c", Action::ShowPosition),
-            ("ctrl+a", Action::LineHome),
-            ("ctrl+e", Action::LineEnd),
-            ("ctrl+y", Action::PageUp),
-            ("ctrl+v", Action::PageDown),
-            ("alt+u", Action::Undo),
-            ("ctrl+z", Action::Undo),
-            ("alt+e", Action::Redo),
-            ("ctrl+shift+z", Action::Redo),
-            ("alt+w", Action::FindNext),
-            ("f3", Action::FindNext),
-            ("alt+q", Action::FindPrev),
-            ("shift+f3", Action::FindPrev),
-            ("ctrl+6", Action::MarkToggle),
-            ("alt+a", Action::MarkToggle),
-            ("alt+6", Action::Copy),
-            ("ctrl+insert", Action::Copy),
-            ("shift+delete", Action::Cut),
-            ("shift+insert", Action::Paste),
-            ("ctrl+n", Action::New),
             ("ctrl+shift+s", Action::SaveAs),
-            ("alt+\\", Action::DocStart),
+            ("ctrl+o", Action::Open),
+            ("ctrl+n", Action::New),
+            ("ctrl+q", Action::Exit),
+            ("ctrl+w", Action::Exit),
+            ("ctrl+z", Action::Undo),
+            ("ctrl+y", Action::Redo),
+            ("ctrl+shift+z", Action::Redo),
+            ("ctrl+x", Action::Cut),
+            ("shift+delete", Action::Cut),
+            ("ctrl+c", Action::Copy),
+            ("ctrl+insert", Action::Copy),
+            ("ctrl+v", Action::Paste),
+            ("shift+insert", Action::Paste),
+            ("ctrl+a", Action::SelectAll),
+            ("ctrl+k", Action::CutLine),
+            ("ctrl+d", Action::DuplicateLine),
+            ("ctrl+/", Action::ToggleComment),
+            ("alt+up", Action::MoveLineUp),
+            ("alt+down", Action::MoveLineDown),
+            ("tab", Action::Indent),
+            ("shift+tab", Action::Unindent),
+            ("ctrl+backspace", Action::DeleteWordLeft),
+            ("ctrl+delete", Action::DeleteWordRight),
+            ("alt+a", Action::MarkToggle),
+            ("ctrl+f", Action::Find),
+            ("f3", Action::FindNext),
+            ("shift+f3", Action::FindPrev),
+            ("ctrl+h", Action::Replace),
+            ("ctrl+g", Action::GotoLine),
+            ("home", Action::LineHome),
+            ("end", Action::LineEnd),
+            ("pgup", Action::PageUp),
+            ("pgdn", Action::PageDown),
             ("ctrl+home", Action::DocStart),
-            ("alt+/", Action::DocEnd),
             ("ctrl+end", Action::DocEnd),
             ("ctrl+left", Action::WordLeft),
             ("ctrl+right", Action::WordRight),
-            ("ctrl+backspace", Action::DeleteWordLeft),
-            ("ctrl+delete", Action::DeleteWordRight),
-            ("alt+n", Action::ToggleLineNumbers),
-            ("alt+l", Action::ToggleWrap),
-            ("alt+x", Action::ToggleHints),
             ("ctrl+plus", Action::ZoomIn),
             ("ctrl+minus", Action::ZoomOut),
             ("ctrl+0", Action::ZoomReset),
-            ("tab", Action::Indent),
-            ("shift+tab", Action::Unindent),
-            ("alt+3", Action::ToggleComment),
-            ("alt+up", Action::MoveLineUp),
-            ("alt+down", Action::MoveLineDown),
-            ("ctrl+d", Action::DuplicateLine),
-            ("ctrl+shift+a", Action::SelectAll),
+            ("alt+z", Action::ToggleWrap),
+            ("alt+n", Action::ToggleLineNumbers),
+            ("alt+x", Action::ToggleHints),
+            ("alt+c", Action::ShowPosition),
+            ("f1", Action::Help),
         ];
         for (chord, action) in expect {
             assert_eq!(k.lookup(c(chord)), Some(action), "{chord}");
@@ -1275,12 +1264,15 @@ mod tests {
         for &a in Action::ALL {
             assert!(k.chord_for(a).is_some(), "{} has no default key", a.name());
         }
-        assert_eq!(k.chord_for(Action::Save), Some(c("ctrl+o")));
+        assert_eq!(k.chord_for(Action::Save), Some(c("ctrl+s")));
+        // Shift+movement keys are left to the built-in selection handling.
+        assert_eq!(k.lookup(c("shift+home")), None);
+        assert_eq!(k.lookup(c("ctrl+shift+end")), None);
     }
 
     #[test]
     fn keymap_rebind_and_unbind() {
-        let mut k = Keymap::nano();
+        let mut k = Keymap::standard();
         let count = k.binds.len();
 
         // Rebinding an existing chord replaces it without adding an entry.
@@ -1300,8 +1292,8 @@ mod tests {
         assert_eq!(k.lookup(c("ctrl+j")), None);
         assert_eq!(k.binds.len(), count);
 
-        // Save still has its first (ctrl+o) binding for the hint bar.
-        assert_eq!(k.chord_for(Action::Save), Some(c("ctrl+o")));
+        // Save still has its first (ctrl+s) binding for the hint bar.
+        assert_eq!(k.chord_for(Action::Save), Some(c("ctrl+s")));
     }
 
     #[test]
@@ -1312,7 +1304,7 @@ mod tests {
              ctrl+j = cut_line\n\
              ctrl+shift+q = no_such_action\n\
              ctrl+= = zoom_in\n\
-             ctrl+o = none ; drop save\n\
+             ctrl+o = none ; drop open\n\
              bogus chord = save\n",
         );
         assert_eq!(cfg.keymap.lookup(c("ctrl+k")), None);
@@ -1580,7 +1572,7 @@ mod tests {
             let line = format!("; {name} = {}", rgb.hex());
             assert!(ini.contains(&line), "missing colour line {line:?}");
         }
-        for (chord, action) in &Keymap::nano().binds {
+        for (chord, action) in &Keymap::standard().binds {
             let line = format!("; {:<12} = {}", chord.display(), action.name());
             assert!(ini.contains(&line), "missing binding line {line:?}");
         }

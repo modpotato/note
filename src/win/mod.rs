@@ -26,8 +26,8 @@ use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::Controls::Dialogs::{
-    GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
-    OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST,
+    OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::HiDpi::{
@@ -42,9 +42,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
     GetMessageW, GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage,
     RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    SystemParametersInfoW, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES,
+    MessageBoxW, SystemParametersInfoW, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES,
     ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA,
-    HTCLIENT, IDC_ARROW, IDC_IBEAM, IDI_APPLICATION, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
+    HTCLIENT, IDC_ARROW, IDC_IBEAM, IDI_APPLICATION, IDYES, MB_DEFBUTTON2, MB_ICONWARNING,
+    MB_YESNO, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW,
     WHEEL_DELTA, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
     WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
@@ -56,7 +57,7 @@ use crate::config::{
     Action, Chord, Config, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
 };
-use crate::editor::{Editor, Move};
+use crate::editor::{save_as_path, Editor, Move};
 use crate::simd;
 use crate::syntax::Lang;
 use render::{rect, Renderer};
@@ -68,7 +69,11 @@ const MAX_PT: i32 = 72;
 /// Capacity, in UTF-16 units, of the open/save dialog path buffer.
 const PATH_CHARS: usize = 32768;
 const WINDOW_CLASS: &str = "note.window";
-const DIALOG_FILTER: &str = "All Files\0*.*\0Text\0*.txt\0\0";
+const OPEN_FILTER: &str = "All Files (*.*)\0*.*\0Text Documents (*.txt)\0*.txt\0\0";
+const SAVE_FILTER: &str = "Text Documents (*.txt)\0*.txt\0All Files (*.*)\0*.*\0\0";
+/// 1-based positions of the entries in SAVE_FILTER.
+const SAVE_FILTER_TEXT: u32 = 1;
+const SAVE_FILTER_ALL: u32 = 2;
 /// Win32 MK_LBUTTON, MK_SHIFT and MK_CONTROL key-state flags (WM_MOUSEMOVE / WM_MOUSEWHEEL wParam).
 const MK_LBUTTON_FLAG: usize = 0x0001;
 const MK_SHIFT_FLAG: usize = 0x0004;
@@ -1797,7 +1802,7 @@ fn caret_rect(app: &App) -> Option<RECT> {
 
 /// Native open dialog. Returns the chosen path.
 fn open_dialog(hwnd: HWND) -> Option<String> {
-    let filter: Vec<u16> = DIALOG_FILTER.encode_utf16().collect();
+    let filter: Vec<u16> = OPEN_FILTER.encode_utf16().collect();
     let mut buf = vec![0u16; PATH_CHARS];
     // SAFETY: OPENFILENAMEW is plain data; the buffers outlive the call.
     unsafe {
@@ -1816,9 +1821,36 @@ fn open_dialog(hwnd: HWND) -> Option<String> {
     Some(from_wide(&buf))
 }
 
-/// Native save dialog, prefilled with `current`. Returns the chosen path.
+/// Save As, prefilled with `current`. Returns the path to write.
+///
+/// With "Text Documents" chosen in the type list, a name typed without an extension gets
+/// .txt ("notes" saves as notes.txt, "notes.md" as notes.md). "All Files" keeps the name
+/// exactly as typed. New documents and .txt files start on "Text Documents"; other files
+/// start on "All Files" so a name like LICENSE is not changed.
 fn save_dialog(hwnd: HWND, current: Option<&str>) -> Option<String> {
-    let filter: Vec<u16> = DIALOG_FILTER.encode_utf16().collect();
+    let mut filter_index = match current {
+        Some(p) if !p.to_ascii_lowercase().ends_with(".txt") => SAVE_FILTER_ALL,
+        _ => SAVE_FILTER_TEXT,
+    };
+    let mut name = current.map(str::to_owned);
+    loop {
+        let (chosen, index) = save_dialog_once(hwnd, name.as_deref(), filter_index)?;
+        let ext = (index == SAVE_FILTER_TEXT).then_some("txt");
+        let path = save_as_path(&chosen, ext);
+        // The extension is added after the dialog closes, so the overwrite check is done
+        // here, on the final name, instead of by the dialog. "No" goes back to the dialog.
+        if !std::path::Path::new(&path).exists() || confirm_overwrite(hwnd, &path) {
+            return Some(path);
+        }
+        name = Some(path);
+        filter_index = index;
+    }
+}
+
+/// Native save dialog, prefilled with `current`, opened on the `filter_index` entry of
+/// SAVE_FILTER. Returns the chosen path and the type-list entry selected when it closed.
+fn save_dialog_once(hwnd: HWND, current: Option<&str>, filter_index: u32) -> Option<(String, u32)> {
+    let filter: Vec<u16> = SAVE_FILTER.encode_utf16().collect();
     let mut buf = vec![0u16; PATH_CHARS];
     if let Some(c) = current {
         for (dst, src) in buf.iter_mut().take(PATH_CHARS - 1).zip(c.encode_utf16()) {
@@ -1826,21 +1858,40 @@ fn save_dialog(hwnd: HWND, current: Option<&str>) -> Option<String> {
         }
     }
     // SAFETY: OPENFILENAMEW is plain data; the buffers outlive the call.
-    unsafe {
+    let index = unsafe {
         let mut ofn: OPENFILENAMEW = zeroed();
         ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
         ofn.hwndOwner = hwnd;
         ofn.lpstrFilter = filter.as_ptr();
-        ofn.nFilterIndex = 1;
+        ofn.nFilterIndex = filter_index;
         ofn.lpstrFile = buf.as_mut_ptr();
         ofn.nMaxFile = PATH_CHARS as u32;
-        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_EXPLORER;
         if GetSaveFileNameW(&mut ofn) == 0 {
             return None;
         }
-    }
+        ofn.nFilterIndex
+    };
     let path = from_wide(&buf);
-    (!path.is_empty()).then_some(path)
+    (!path.is_empty()).then_some((path, index))
+}
+
+/// Asks before replacing an existing file. True means replace.
+fn confirm_overwrite(hwnd: HWND, path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    let text = wide(&format!(
+        "{name} already exists.\nDo you want to replace it?"
+    ));
+    let caption = wide("Confirm Save As");
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        ) == IDYES
+    }
 }
 
 /// Reads CF_UNICODETEXT from the clipboard.

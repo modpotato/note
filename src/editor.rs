@@ -20,7 +20,7 @@ pub struct Editor {
     pub cursor: usize,
     /// Selection anchor; selection = [min(anchor, cursor), max).
     pub anchor: Option<usize>,
-    /// nano ^6: every movement extends the selection.
+    /// Mark mode (Alt+A): every movement extends the selection.
     pub mark_mode: bool,
     /// Visual column remembered across up/down moves.
     pub preferred_col: Option<usize>,
@@ -1257,6 +1257,39 @@ impl Editor {
 
 /// Rows that `cursor_view_pos` will count before giving up. Far beyond any screen.
 const VIEW_LIMIT_ROWS: usize = 4096;
+
+// ---------------------------------------------------------------------------
+// Save As file names
+// ---------------------------------------------------------------------------
+
+/// Final path for a Save As. `default_ext` (without the dot) is added when the file name has
+/// no extension of its own, so "notes" becomes "notes.txt" while "notes.md" and ".gitignore"
+/// stay as typed. A name ending in '.' asks for no extension: Windows drops trailing dots
+/// from file names, so they are removed here too and nothing is added.
+pub fn save_as_path(chosen: &str, default_ext: Option<&str>) -> String {
+    let name_start = chosen.rfind(['\\', '/']).map_or(0, |i| i + 1);
+    let name = &chosen[name_start..];
+    if name.ends_with('.') {
+        let stem = name.trim_end_matches('.');
+        if stem.is_empty() {
+            return chosen.to_string();
+        }
+        return chosen[..name_start + stem.len()].to_string();
+    }
+    match default_ext {
+        Some(ext) if !has_extension(name) => format!("{chosen}.{ext}"),
+        _ => chosen.to_string(),
+    }
+}
+
+/// True when `name` ends in an extension: a '.' followed by at least one character and no
+/// spaces, the way Windows (PathFindExtension) reads it.
+fn has_extension(name: &str) -> bool {
+    match name.rfind('.') {
+        Some(i) => i + 1 < name.len() && !name[i + 1..].contains(' '),
+        None => false,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -2599,6 +2632,35 @@ mod tests {
         let mut e = Editor::new(&Config::default());
         e.load("/home/u/readme.md", b"");
         assert_eq!(e.title(), "readme.md - note");
+    }
+
+    #[test]
+    fn save_as_adds_the_default_extension_only_when_missing() {
+        let txt = Some("txt");
+        assert_eq!(save_as_path("C:\\d\\asdf", txt), "C:\\d\\asdf.txt");
+        assert_eq!(save_as_path("C:\\d\\asdf.md", txt), "C:\\d\\asdf.md");
+        assert_eq!(save_as_path("C:\\d\\asdf.txt", txt), "C:\\d\\asdf.txt");
+        assert_eq!(save_as_path("C:\\d\\a.b.json", txt), "C:\\d\\a.b.json");
+        assert_eq!(save_as_path("C:\\d\\.gitignore", txt), "C:\\d\\.gitignore");
+        // A dot in a folder name is not the file's extension.
+        assert_eq!(save_as_path("C:\\my.dir\\notes", txt), "C:\\my.dir\\notes.txt");
+        assert_eq!(save_as_path("/home/u.v/notes", txt), "/home/u.v/notes.txt");
+        // Text after the last dot that contains a space is not an extension.
+        assert_eq!(save_as_path("C:\\d\\v1.2 notes", txt), "C:\\d\\v1.2 notes.txt");
+    }
+
+    #[test]
+    fn save_as_trailing_dot_means_no_extension() {
+        assert_eq!(save_as_path("C:\\d\\asdf.", Some("txt")), "C:\\d\\asdf");
+        assert_eq!(save_as_path("C:\\d\\asdf...", Some("txt")), "C:\\d\\asdf");
+        assert_eq!(save_as_path("C:\\d\\asdf.", None), "C:\\d\\asdf");
+        assert_eq!(save_as_path("C:\\d\\..", Some("txt")), "C:\\d\\..");
+    }
+
+    #[test]
+    fn save_as_without_default_extension_keeps_the_name() {
+        assert_eq!(save_as_path("C:\\d\\LICENSE", None), "C:\\d\\LICENSE");
+        assert_eq!(save_as_path("C:\\d\\asdf.md", None), "C:\\d\\asdf.md");
     }
 
     #[test]

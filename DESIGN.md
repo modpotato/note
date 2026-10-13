@@ -1,8 +1,9 @@
 # note — architecture & module contracts
 
 Ultra-light Win32 text editor. Pure Win32 + GDI, no frameworks, no tabs, no menu bar.
-Single window: text area + 1-line status bar + (toggleable) nano-style 2-line shortcut hint bar.
-Dark by default, configurable via `%APPDATA%\note\note.ini`. Nano keybinds by default.
+Single window: text area + 1-line status bar + (toggleable) 2-line shortcut hint bar.
+Dark by default, configurable via `%APPDATA%\note\note.ini`. Windows Notepad keys by default, plus
+a few line-editing extras (ctrl+k cut line, ctrl+d duplicate, alt+up/down move line).
 
 Crate layout (library + thin binary so everything but `win/` is unit-testable on Linux):
 
@@ -194,11 +195,10 @@ impl Theme { pub fn dark() -> Theme; pub fn light() -> Theme; }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Action {
-    // nano-flavoured
-    Save, SaveAs, Open, New, Exit, CutLine, Paste /* nano uncut + clipboard */, Copy, Cut, Find, FindNext, FindPrev,
+    Save, SaveAs, Open, New, Exit, CutLine, Paste /* clipboard, else the cut buffer */, Copy, Cut, Find, FindNext, FindPrev,
     Replace, GotoLine, ShowPosition, Help, Undo, Redo, SelectAll, LineHome, LineEnd, PageUp, PageDown,
     DocStart, DocEnd, WordLeft, WordRight, DeleteWordLeft, DeleteWordRight, ToggleLineNumbers, ToggleWrap,
-    ToggleHints, ZoomIn, ZoomOut, ZoomReset, Indent, Unindent, DuplicateLine, MarkToggle /* nano ^6 set mark */,
+    ToggleHints, ZoomIn, ZoomOut, ZoomReset, Indent, Unindent, DuplicateLine, MarkToggle /* mark mode: movement extends selection */,
     ToggleComment, MoveLineUp, MoveLineDown,
 }
 impl Action { pub fn from_name(s: &str) -> Option<Action> /* snake_case e.g. "cut_line" */; pub fn name(self) -> &'static str; }
@@ -210,7 +210,7 @@ impl Chord { pub fn parse(s: &str) -> Option<Chord> /* "ctrl+k", "alt+u", "ctrl+
 
 pub struct Keymap { /* small Vec<(Chord, Action)>, linear scan is fine (<100 entries) */ }
 impl Keymap {
-    pub fn nano() -> Keymap;          // default — see table below
+    pub fn standard() -> Keymap;      // default — see table below
     pub fn lookup(&self, c: Chord) -> Option<Action>;
     pub fn bind(&mut self, c: Chord, a: Action); // replaces existing binding for chord
     pub fn unbind(&mut self, c: Chord);
@@ -228,7 +228,7 @@ pub struct Config {
     pub insert_spaces: bool,    // false
     pub line_numbers: bool,     // true
     pub word_wrap: bool,        // false
-    pub show_hints: bool,       // false (nano shortcut bar, Alt+X)
+    pub show_hints: bool,       // false (shortcut bar, Alt+X)
     pub highlight_current_line: bool, // true
     pub syntax: bool,           // true
     pub auto_indent: bool,      // true
@@ -236,7 +236,7 @@ pub struct Config {
     pub theme: Theme,
     pub keymap: Keymap,
 }
-impl Default for Config { /* dark theme + nano keymap */ }
+impl Default for Config { /* dark theme + standard keymap */ }
 impl Config {
     /// Parse INI text on top of defaults. Unknown keys ignored. Never fails.
     pub fn parse(src: &str) -> Config;
@@ -266,33 +266,29 @@ ctrl+k = cut_line      ; rebind
 ctrl+q = none          ; unbind
 ```
 
-Default nano keymap (Windows-friendly where nano's key is meaningless on Windows):
+Default keymap: Windows Notepad keys plus line-editing extras:
 | chord | action | | chord | action |
 |---|---|---|---|---|
-| ^O | save | | ^S | save |
-| ^X | exit | | ^R | open |
-| ^K | cut_line | | ^U | paste |
-| ^W | find | | ^F | find |
-| ^\ | replace | | ctrl+h | replace |
-| ^_ (ctrl+shift+minus) | goto_line | | ctrl+l | goto_line |
-| ^G / F1 | help | | ^C | show_position (copy = alt+6 / ctrl+insert, like nano) |
-| ^A | line_home | | ^E | line_end |
-| ^Y | page_up | | ^V | page_down |
-| alt+u / ^Z | undo | | alt+e / ctrl+shift+z | redo |
-| alt+w / F3 | find_next | | alt+q / shift+F3 | find_prev |
-| ctrl+6 / alt+a | mark_toggle | | alt+6 / ctrl+insert | copy |
-| shift+delete | cut | | shift+insert | paste |
-| ctrl+n | new | | ctrl+shift+s | save_as |
-| alt+\ / ctrl+home | doc_start | | alt+/ / ctrl+end | doc_end |
-| ctrl+left/right | word_left/right | | ctrl+backspace / ctrl+delete | delete_word_left/right |
-| alt+n | toggle_line_numbers | | alt+l | toggle_wrap |
-| alt+x | toggle_hints | | ctrl+plus/minus/0 | zoom in/out/reset |
-| tab / shift+tab (with selection) | indent / unindent | | alt+3 | toggle_comment |
-| alt+up / alt+down | move_line_up/down | | ctrl+d | duplicate_line |
-| ctrl+shift+a | select_all | | | |
+| ctrl+s | save | | ctrl+shift+s | save_as |
+| ctrl+o | open | | ctrl+n | new |
+| ctrl+q / ctrl+w | exit (alt+f4 via DefWindowProc) | | F1 | help |
+| ctrl+z | undo | | ctrl+y / ctrl+shift+z | redo |
+| ctrl+x / shift+delete | cut | | ctrl+c / ctrl+insert | copy |
+| ctrl+v / shift+insert | paste | | ctrl+a | select_all |
+| ctrl+k | cut_line | | ctrl+d | duplicate_line |
+| ctrl+/ | toggle_comment | | alt+up / alt+down | move_line_up/down |
+| tab / shift+tab | indent / unindent | | alt+a | mark_toggle |
+| ctrl+backspace / ctrl+delete | delete_word_left/right | | | |
+| ctrl+f | find | | ctrl+h | replace |
+| F3 | find_next | | shift+F3 | find_prev |
+| ctrl+g | goto_line | | alt+c | show_position |
+| home / end | line_home / line_end | | pgup / pgdn | page_up / page_down |
+| ctrl+home / ctrl+end | doc_start / doc_end | | ctrl+left/right | word_left/right |
+| ctrl+plus/minus/0 | zoom in/out/reset | | alt+z | toggle_wrap |
+| alt+n | toggle_line_numbers | | alt+x | toggle_hints |
 
-(Plain navigation keys — arrows, Home/End, PgUp/PgDn, with Shift for selection — are handled
-directly by the window layer, not via the keymap.)
+(Shifted navigation keys — arrows, Home/End, PgUp/PgDn and their Ctrl forms — are not in the
+keymap; the window layer handles them directly and extends the selection.)
 
 ---------------------------------------------------------------------------
 ## editor.rs — platform independent
@@ -302,7 +298,7 @@ pub struct Editor {
     pub buf: Buffer,
     pub cursor: usize,               // byte offset
     pub anchor: Option<usize>,       // selection anchor; selection = [min(anchor,cursor), max)
-    pub mark_mode: bool,             // nano ^6: movement extends selection without shift
+    pub mark_mode: bool,             // alt+a: movement extends selection without shift
     pub preferred_col: Option<usize>,// visual column memory for up/down
     pub scroll_line: usize,          // first visible line (no-wrap mode) / first visible visual row
     pub scroll_col: usize,           // horizontal scroll in columns (no-wrap mode)
@@ -386,6 +382,10 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   area — a tiny inline single-line input owned by App (no EDIT control): Enter confirms, Esc cancels.
   Exit / open with unsaved changes -> nano-style prompt "Save modified buffer? (Y/N/^C)".
   Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
+  Save As lists "Text Documents (*.txt)" first: with it selected, a name typed without an extension
+  gets .txt (`editor::save_as_path`); "All Files" keeps the name as typed. No lpstrDefExt: comdlg32
+  can append it even after a typed extension it does not recognise (notes.md -> notes.md.txt).
+  The overwrite prompt is a MessageBoxW after the extension is applied, so it checks the final name.
 - Clipboard: CF_UNICODETEXT, convert LF <-> CRLF.
 - Rendering (render.rs): one memory DC + DIB section bitmap sized to client rect, recreated on WM_SIZE only.
   Fonts: CreateFontW (fixed pitch), regular plus optional bold face; char width from GetTextExtentPoint32W("M").
