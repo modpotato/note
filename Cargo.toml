@@ -9,6 +9,12 @@ license = "MIT"
 name = "note"
 path = "src/main.rs"
 
+[features]
+default = ["embed-font"]
+# Embeds Paper Mono (OFL 1.1) in the exe and registers it privately at startup.
+# Build with --no-default-features to leave it out and use an installed font instead.
+embed-font = []
+
 [dependencies]
 
 [target.'cfg(windows)'.dependencies.windows-sys]
@@ -27,6 +33,7 @@ features = [
   "Win32_System_Ole",
   "Win32_Storage_FileSystem",
   "Win32_UI_HiDpi",
+  "Win32_UI_Controls",
 ]
 
 [profile.release]
@@ -40,3 +47,6 @@ incremental = false
 
 [profile.dev]
 panic = "abort"
+
+[build-dependencies]
+embed-resource = "3.0.12"

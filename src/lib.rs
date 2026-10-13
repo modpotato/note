@@ -7,3 +7,5 @@ pub mod simd;
 pub mod syntax;
 #[cfg(windows)]
 pub mod win;
+
+const _: () = assert!(config::TOK_COUNT == syntax::TOK_COUNT);

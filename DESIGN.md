@@ -218,13 +218,17 @@ impl Keymap {
 }
 
 pub struct Config {
-    pub font_face: String,      // "Cascadia Mono" (renderer falls back to "Consolas")
+    pub font_faces: Vec<String>,// preference list, ["Paper Mono"] (renderer then falls back to "Consolas")
     pub font_size: i32,         // points, 11
+    pub font_weight: i32,       // 100..=900, 400
+    pub bold_keywords: bool,    // keyword/type runs use a weight-700 face, false
+    pub line_height: f32,       // pitch = round(tmHeight * line_height), 1.0..=2.5, 1.2
+    pub font_smoothing: FontSmoothing, // ClearType | Grayscale | Off
     pub tab_width: usize,       // 4
     pub insert_spaces: bool,    // false
     pub line_numbers: bool,     // true
     pub word_wrap: bool,        // false
-    pub show_hints: bool,       // true (nano shortcut bar)
+    pub show_hints: bool,       // false (nano shortcut bar, Alt+X)
     pub highlight_current_line: bool, // true
     pub syntax: bool,           // true
     pub auto_indent: bool,      // true
@@ -249,7 +253,7 @@ tab_width = 4
 insert_spaces = false
 line_numbers = true
 word_wrap = false
-show_hints = true
+show_hints = false
 highlight_current_line = true
 syntax = true
 auto_indent = true
@@ -375,14 +379,17 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   WM_CHAR inserts printable chars (>= 0x20, excluding when Ctrl is down unless AltGr i.e. ctrl+alt);
   handle UTF-16 surrogate pairs. WM_SYSCHAR swallowed when we handled alt combo (avoid beep).
   Mouse: click positions caret, shift+click extends, drag selects (SetCapture), double-click selects word,
-  wheel scrolls 3 lines (ctrl+wheel zooms).
+  wheel scrolls 3 lines (ctrl+wheel zooms). Scrollbars are custom-painted (no WS_VSCROLL): a vertical
+  strip on the text's right edge and a horizontal one above the status row (only without wrap, when a
+  visible line runs past the view). Hit-tested before the text in mouse messages; WM_SETCURSOR shows an arrow over them.
 - Prompt bar (nano style): find / replace / goto / save-as-confirm prompts typed into the status line
   area — a tiny inline single-line input owned by App (no EDIT control): Enter confirms, Esc cancels.
   Exit / open with unsaved changes -> nano-style prompt "Save modified buffer? (Y/N/^C)".
   Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
 - Clipboard: CF_UNICODETEXT, convert LF <-> CRLF.
 - Rendering (render.rs): one memory DC + DIB section bitmap sized to client rect, recreated on WM_SIZE only.
-  Fonts: CreateFontW (ClearType, fixed pitch), regular only; char width from GetTextMetricsW (tmAveCharWidth) / GetTextExtentPoint32W("M").
+  Fonts: CreateFontW (fixed pitch), regular plus optional bold face; char width from GetTextExtentPoint32W("M").
+  `win/fonts.rs` registers the embedded Paper Mono faces with AddFontMemResourceEx at startup (feature `embed-font`).
   Paint only visible lines: for each line, slice_into scratch Vec<u8>, highlight via Highlighter::state_at +
   highlight_line, convert UTF-8 -> UTF-16 into reusable scratch Vec<u16> while expanding tabs, emit
   ExtTextOutW runs per span color (SetTextColor). Selection: fill rect behind selected columns. Caret: own
