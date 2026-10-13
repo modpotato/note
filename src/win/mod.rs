@@ -40,7 +40,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
-    GetMessageW, GetWindowLongPtrW, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage,
+    GetMessageW, GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage,
     RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     SystemParametersInfoW, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES,
     ShowWindow, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA,
@@ -207,12 +207,19 @@ pub fn run() {
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
 
+        // The process lives exactly as long as its window: the loop ends on WM_QUIT, on a
+        // GetMessage error, or as soon as the window no longer exists (even if no quit
+        // message was posted), and the process then exits immediately.
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            if IsWindow(hwnd) == 0 {
+                break;
+            }
         }
     }
+    std::process::exit(0);
 }
 
 /// `px` at 96 dpi, scaled to `dpi`, never below 1.
