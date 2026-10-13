@@ -8,6 +8,9 @@
 ; Silent:    setup.exe /S [/CurrentUser | /AllUsers] [/D=<install dir>]
 ; Uninstall: "<install dir>\uninstall.exe" /S [/CurrentUser | /AllUsers]
 
+; The setup program itself is 32-bit (x86-unicode, the NSIS default): the official Windows
+; NSIS builds ship only x86 stubs. It installs the 64-bit note.exe and uses the 64-bit
+; registry view and Program Files, and refuses to run on 32-bit Windows.
 Unicode true
 SetCompressor /SOLID lzma
 ManifestDPIAware true
@@ -63,6 +66,7 @@ ManifestDPIAware true
 !include FileFunc.nsh
 !include StrFunc.nsh
 !include WinMessages.nsh
+!include x64.nsh
 ${Using:StrFunc} UnStrRep
 
 Name "${APPNAME} ${VERSION}"
@@ -223,7 +227,7 @@ VIAddVersionKey "LegalCopyright" "MIT"
   ; Measure the stored value before reading it. ReadRegStr returns an empty string for a
   ; value longer than NSIS can hold, and writing after that would erase the whole PATH.
   StrCpy $R9 -1                 ; byte size of the value, -1 when it is missing
-  System::Call 'advapi32::RegOpenKeyExW(p ${HKEY}, t "${KEY}", i 0, i 0x20019, *p .R8) i .R7'
+  System::Call 'advapi32::RegOpenKeyExW(p ${HKEY}, t "${KEY}", i 0, i 0x20119, *p .R8) i .R7'
   ${If} $R7 = 0
     System::Call 'advapi32::RegQueryValueExW(p $R8, t "Path", p 0, p 0, p 0, *i .R9) i .R7'
     System::Call 'advapi32::RegCloseKey(p $R8)'
@@ -310,7 +314,13 @@ VIAddVersionKey "LegalCopyright" "MIT"
 Var CmdLineInstDir
 
 Function .onInit
-  ; The 64-bit view is needed for the uninstall key of the all-users install.
+  ; note.exe is x64 only.
+  ${IfNot} ${RunningX64}
+    MessageBox MB_OK|MB_ICONSTOP "${APPNAME} requires 64-bit Windows." /SD IDOK
+    SetErrorLevel 2
+    Abort
+  ${EndIf}
+  ; This setup is 32-bit: use the 64-bit registry view everywhere (uninstall key, classes).
   SetRegView 64
   ; /D= has already set $INSTDIR. Keep it, because MultiUser overwrites $INSTDIR next.
   StrCpy $CmdLineInstDir $INSTDIR
