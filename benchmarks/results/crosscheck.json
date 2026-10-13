@@ -1,0 +1,8 @@
+{
+  "file": "mixed-100m.txt",
+  "pattern": "\\bfn\\s+\\w+",
+  "python": "3.13.16",
+  "whole_text_matches": 28226,
+  "per_line_matches": 28223,
+  "spanning_newline": 3
+}
