@@ -14,8 +14,8 @@ rustup target add x86_64-pc-windows-gnu
 
 python3 benchmarks/run_benchmarks.py --check   # which tools are present, and what each enables
 python3 benchmarks/corpora.py --verify         # the corpora regenerate to the committed digests
-python3 benchmarks/run_benchmarks.py           # builds, tests, timed suites, memory: about 25 minutes
-python3 benchmarks/wine_compare.py             # note against Wine's Notepad: about 15 minutes
+python3 benchmarks/run_benchmarks.py           # builds, tests, timed suites, memory: about 7 minutes
+python3 benchmarks/wine_compare.py             # note against Wine's Notepad: about 12 minutes, with the Wine prefix
 python3 benchmarks/crosscheck_search.py        # Python re cross-check of one search count: seconds
 python3 benchmarks/render_report.py            # writes benchmarks/REPORT.html
 ```

@@ -316,7 +316,7 @@ def summary_section():
     deps = CODE["dependencies"]
     open_m = mem("open", BIG)
     top = rec("editing", BIG, "keystroke: type at top")
-    worst = max(rec("regex", "-", n)["median_ns"] for n in ("(x+x+)+y on x^26", ".*.*.*= on 4000 bytes, no =") if rec("regex", "-", n))
+    worst = max(rec("regex", "-", n)["median_ns"] for n in ("(a|aa)+c on a^28 b", "(x+x+)+y on x^26", "^(\\w+\\s?)*$ on (w^24)!", ".*.*.*= on 4000 bytes, no =") if rec("regex", "-", n))
     nsps = [rec("regex", "-", n)["ns_per_step"] for n in ("(a|aa)+c on a^28 b", "(x+x+)+y on x^26", "^(\\w+\\s?)*$ on (w^24)!", ".*.*.*= on 4000 bytes, no =") if rec("regex", "-", n)]
     tile_items = [
         (f"{t['passed']} / {t['passed'] + t['failed']}", "tests pass", f"release mode, {t['run_seconds']:.2f} s", "good" if t["failed"] == 0 else "critical"),
@@ -328,7 +328,7 @@ def summary_section():
          if WIN_OK else ("n/a", "Windows exe", "not built: MinGW or NSIS was missing", "info")),
         (f"{open_m['retained_bytes'] / open_m['file_bytes']:.2f}×", "heap kept after opening 100 MiB", f"{open_m['lines']:,} lines, 8 bytes of index each", "good"),
         (fmt_ns(top["median_ns"]), "keystroke at the top, 100 MiB", "median; it grows with the lines after the cursor", "watch"),
-        (f"{min(nsps):.1f}–{max(nsps):.1f} ns", "per regex step", f"the budget stops the worst case in {fmt_ns(worst)}", "good"),
+        (f"{min(nsps):.1f}–{max(nsps):.1f} ns", "per regex step", f"the slowest of the four stops or finishes in {fmt_ns(worst)}", "good"),
     ]
     return (
         '<section id="summary"><h2>Summary</h2>'
@@ -430,7 +430,7 @@ def verdict_section():
         ["Build and dependencies",
          f"{BUILD['cold_release_s']:.1f} s cold release; {len(CODE['dependencies']['runtime'])} runtime dependencies on Linux",
          "good",
-         "A small build with no runtime dependencies on Linux, and one Windows-only binding crate. An incremental build takes about two thirds of a cold one, which fits whole-crate optimisation under fat LTO."],
+         f"A small build with no runtime dependencies on Linux, and one Windows-only binding crate. An incremental build takes {BUILD['incremental_release_s'] / BUILD['cold_release_s'] * 100:.0f}% of a cold one, which fits whole-crate optimisation under fat LTO."],
         ["Size",
          f"exe {fmt_kb(exe)}, installer {fmt_kb(inst)} (MinGW build)",
          "watch",
@@ -487,9 +487,10 @@ def latency_section():
     hi = rec("pipeline", "c-headers.h", "highlight whole file (C)")
     if hi:
         rows.append((f"first highlight, whole {mb_of('c-headers.h')} C file", hi["median_ns"], hi["p10_ns"], hi["p90_ns"], "s1"))
-    worst = rec("regex", "-", "(x+x+)+y on x^26")
-    if worst:
-        rows.append(("regex, worst case, budget stop", worst["median_ns"], worst["p10_ns"], worst["p90_ns"], "s1"))
+    slowest = max((rec("regex", "-", n) for n in ("(a|aa)+c on a^28 b", "(x+x+)+y on x^26", "^(\\w+\\s?)*$ on (w^24)!", ".*.*.*= on 4000 bytes, no =") if rec("regex", "-", n)),
+                  key=lambda r: r["median_ns"], default=None)
+    if slowest:
+        rows.append(("regex, slowest pathological case", slowest["median_ns"], slowest["p10_ns"], slowest["p90_ns"], "s1"))
     ticks = [(1e3, "1 µs"), (1e4, "10 µs"), (1e5, "100 µs"), (1e6, "1 ms"), (1e7, "10 ms"), (1e8, "100 ms"), (1e9, "1 s"), (1e10, "10 s")]
     thresholds = [(16e6, "16 ms · one frame", "good"), (1e8, "100 ms · noticeable", "watch"), (1e9, "1 s · freezes", "critical")]
     chart = range_plot(rows, 1e3, 1e10, ticks, thresholds)
@@ -508,7 +509,8 @@ def latency_section():
             f"Every keystroke median stays under {fmt_ns(typing_max)} on 100 MiB"
             f"{', inside one 60 Hz frame' if typing_max < 16e6 else ', above one 60 Hz frame'}. "
             f"Operations above 100 ms: {'; '.join(slow_ops) if slow_ops else 'none'}. "
-            f"Cursor down is the exception to the size trend: {fmt_ns(rec('editing', MID, 'cursor down')['median_ns'])} at 10 MiB against "
+            f"Cursor down does not grow with size: {fmt_ns(rec('editing', SMALL, 'cursor down')['median_ns'])} at 1 MiB, "
+            f"{fmt_ns(rec('editing', MID, 'cursor down')['median_ns'])} at 10 MiB and "
             f"{fmt_ns(rec('editing', BIG, 'cursor down')['median_ns'])} at 100 MiB, and the cause was not isolated."
         ),
         foot="Figures under 1 µs are single calls timed separately, so they include the cost of the timer call; read them as orders of magnitude.",
@@ -588,7 +590,7 @@ def avx2_section():
         bar_rows([(n, a / s, "s1", f"{a / s:.2f}×", f"{n}: AVX2 is {a / s:.2f}× SSE2") for n, a, s in kern], max(ratios) * 1.08),
         takeaway=(
             f"On kernels at 64 MiB, AVX2 is between {min(ratios):.2f}× and {max(ratios):.2f}× the SSE2 speed. "
-            f"Whole-file operations gain between {min(pr):.2f}× and {max(pr):.2f}×. That suggests memory traffic, which both paths share, sets the pace at this size."
+            f"Whole-file operations gain between {min(pr):.2f}× and {max(pr):.2f}×."
         ),
     )
     kern_rows = [[n, fmt_speed(a), fmt_speed(s), f"{a / s:.2f}×"] for n, a, s in kern]
@@ -1135,11 +1137,15 @@ def claims_section():
     exe, nofont, inst = (WIN["default_exe_bytes"], WIN["nofont_exe_bytes"], WIN["installer_bytes"]) if WIN_OK else (0, 0, 0)
     ns = [r["ns_per_step"] for r in SUITE if r["group"] == "regex" and "ns_per_step" in r]
     live = rec("editing", BIG, "live preview (50 lines, budget 4M)")
+    font_bytes = sum(WIN.get("font_files_bytes", {}).values())
+    font_gap = abs((exe - nofont) - font_bytes) / font_bytes * 100 if font_bytes else 0.0
     rows = [
         ['README: "About 870 KB as a single exe"', fmt_kb(exe), Raw(badge("watch")), "Different toolchain. The MSVC build cannot be made here."],
         ['README: "about 660 KB without the font"', fmt_kb(nofont), Raw(badge("watch")), "Same reason."],
-        ['README: the font saves "about 210 KB"', fmt_kb(exe - nofont), Raw(badge("good")), "Holds: the difference is within 0.3% of the two font files' size."],
-        ['README: installer "about 520 KB"', fmt_kb(inst), Raw(badge("watch")), "Above the figure by about 10%. NSIS version and exe toolchain differ."],
+        ['README: the font saves "about 210 KB"', fmt_kb(exe - nofont), Raw(badge("good" if font_gap < 1 else "watch")),
+         f"{'Holds' if font_gap < 1 else 'Does not hold'}: the difference is within {font_gap:.1f}% of the two font files' size."],
+        ['README: installer "about 520 KB"', fmt_kb(inst), Raw(badge("watch")),
+         f"{'Above' if inst > 520_000 else 'At or below'} the figure by about {abs(inst / 520_000 - 1) * 100:.0f}%. NSIS version and exe toolchain differ."],
         ['README: byte scans use SSE2, and "AVX2 when your CPU has it"', "dispatch in src/simd.rs; AVX2 measured on this CPU", Raw(badge("good")), "Holds. The speed difference is in the AVX2 section."],
         ['src/search.rs: a budget step is "roughly a few nanoseconds each"', f"{min(ns):.1f}–{max(ns):.1f} ns per step", Raw(badge("good")), "Holds."],
         ['README: the live preview "only searches the lines on screen"', f"50-line preview {fmt_ns(live['median_ns'])} on 100 MiB", Raw(badge("good")), "Holds: the 50-line preview takes under 12 µs at every size in the table."],
@@ -1206,7 +1212,7 @@ def method_section():
     repeat_text = f"up to {max(repeat):.0f}%" if repeat else "not measured"
     items = [
         "Timed suites ran one at a time, after the builds finished. Each measurement repeats until it has at least five samples and 600 ms of total time, or at least three samples and ten seconds, or 200 samples, whichever comes first.",
-        f"Repeatability: the same 1 MiB kernels, run twice, differed by {repeat_text}. Treat differences under about 20% at that size as noise; the 64 MiB and 100 MiB figures are steadier.",
+        f"Repeatability: the same 1 MiB kernels, run twice, differed by {repeat_text}. Differences smaller than that spread are noise. The repeat was run only at 1 MiB, so the larger figures have no repeat evidence.",
         "Medians are reported with the 10th and 90th percentiles where the spread matters. Per-keystroke numbers come from timing each call separately.",
         "MB means 10⁶ bytes; MiB means 2²⁰ bytes. File sizes in the names are MiB: mixed-100m.txt is 100 MiB.",
         "Heap figures come from a counting global allocator in a separate binary, one scenario per process. The timing runs use the normal allocator.",
@@ -1224,7 +1230,7 @@ def method_section():
         f'<h3 class="sub-h">Corpora</h3><p class="lede-s">{esc(corpora_note)}</p>'
         f'{table(["File", "Size", "SHA-256 (first 16 hex digits)"], corpus_rows, numeric=(1,))}'
         '<h3 class="sub-h">Shape of the corpora</h3>'
-        '<p class="lede-s">The generated corpora next to the real code in this repository, measured the same way.</p>'
+        f'<p class="lede-s">The generated corpora next to the real code in this repository, measured the same way. The mixed stream has more blank lines than the code in this repository, and its C headers are {CORPORA["files"]["c-headers.h"]["stats"]["blank_pct"]:.1f}% blank.</p>'
         f'{table(["Corpus", "Source", "Lines", "Bytes per line", "Blank", "Comment-like", "Non-ASCII", "Longest line"], realism_rows(), numeric=(2, 3, 4, 5, 6, 7))}</section>'
     )
 

@@ -2,7 +2,7 @@
 """Runs the whole benchmark campaign and writes benchmarks/results/latest.json.
 
     python3 benchmarks/run_benchmarks.py --check    which tools are present, and what they enable
-    python3 benchmarks/run_benchmarks.py            everything (about 25 minutes)
+    python3 benchmarks/run_benchmarks.py            everything (about 7 minutes)
     python3 benchmarks/run_benchmarks.py --quick    skips the 100 MiB encoding variants
 
 Before anything runs, the corpora in target/bench-data must match the digests committed in
