@@ -1,8 +1,9 @@
 {
   "file": "mixed-100m.txt",
+  "sha256": "222732acb1966620c10d40627cb2e6bc687f9b6db5761f9f5e631ca4dc07498b",
   "pattern": "\\bfn\\s+\\w+",
   "python": "3.13.16",
-  "whole_text_matches": 28226,
-  "per_line_matches": 28223,
-  "spanning_newline": 3
+  "whole_text_matches": 31567,
+  "per_line_matches": 31567,
+  "spanning_newline": 0
 }
