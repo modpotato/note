@@ -9,7 +9,6 @@
 ; Uninstall: "<install dir>\uninstall.exe" /S [/CurrentUser | /AllUsers]
 
 Unicode true
-Target amd64-unicode
 SetCompressor /SOLID lzma
 ManifestDPIAware true
 
