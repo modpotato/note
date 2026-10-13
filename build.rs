@@ -10,6 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=assets/icon/note.ico");
+    println!("cargo:rerun-if-changed=assets/note.manifest");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -20,6 +21,8 @@ fn main() {
     // Forward slashes work for rc.exe, llvm-rc and windres alike, and need no escaping.
     let icon = manifest_dir.join("assets/icon/note.ico");
     let icon = icon.to_string_lossy().replace('\\', "/");
+    let manifest = manifest_dir.join("assets/note.manifest");
+    let manifest = manifest.to_string_lossy().replace('\\', "/");
 
     let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     // FILEVERSION and PRODUCTVERSION need four numbers. Pre-release tags are not numeric,
@@ -37,6 +40,8 @@ fn main() {
     // Generated here rather than kept in the tree, so the version can never drift from Cargo.toml.
     let rc = format!(
         r#"1 ICON "{icon}"
+
+1 24 "{manifest}"
 
 1 VERSIONINFO
 FILEVERSION {major},{minor},{patch},0

@@ -1,4 +1,5 @@
 //! Rough throughput check: `cargo run --release --example bench -- <file>`
+use note::search::{self, Mode, Query, Searcher};
 use note::{buffer::Buffer, encoding, simd, syntax};
 use std::time::Instant;
 
@@ -28,4 +29,28 @@ fn main() {
     let d_lex = t.elapsed();
     println!("{mb:.1} MB, {} lines", buf.line_count());
     println!("decode   {d_decode:?}\nindex    {d_index:?}\ncount    {d_count:?} ({hits} hits)\nlex-all  {d_lex:?} (state {st})");
+
+    // Find-all throughput for a few query shapes (count over the whole text).
+    let text = buf.make_contiguous();
+    for (find, mode, case) in [
+        ("return", Mode::Plain, true),
+        ("return", Mode::Plain, false),
+        ("\\bfn\\s+\\w+", Mode::Regex, true),
+        ("[A-Z][a-z]+Error", Mode::Regex, true),
+        ("(?<=\\()\\w+(?=\\))", Mode::Regex, true),
+        ("^\\s*//.*$", Mode::Regex, true),
+    ] {
+        let q = Query {
+            find: find.to_string(),
+            mode,
+            match_case: case,
+            ..Query::default()
+        };
+        let mut s = Searcher::new(&q).expect("query");
+        let mut budget = u64::MAX;
+        let t = Instant::now();
+        let n = search::count(&mut s, text, (0, text.len()), &mut budget);
+        let tag = if case { "" } else { " (ignore case)" };
+        println!("find     {:?} {find}{tag}: {n:?}", t.elapsed());
+    }
 }

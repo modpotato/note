@@ -9,18 +9,17 @@ use std::borrow::Cow;
 use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::encoding::{self, Encoding, LineEnding};
+use crate::regex::TooComplex;
+use crate::search::{self, Found, Hit, Scope, Searcher};
 use crate::simd;
 use crate::syntax::{Highlighter, Lang};
-
-/// Substring search function (case-sensitive or ASCII case-insensitive).
-type Finder = fn(&[u8], &[u8]) -> Option<usize>;
 
 pub struct Editor {
     pub buf: Buffer,
     pub cursor: usize,
     /// Selection anchor; selection = [min(anchor, cursor), max).
     pub anchor: Option<usize>,
-    /// nano ^6: every movement extends the selection.
+    /// Mark mode (Alt+A): every movement extends the selection.
     pub mark_mode: bool,
     /// Visual column remembered across up/down moves.
     pub preferred_col: Option<usize>,
@@ -42,10 +41,6 @@ pub struct Editor {
     pub path: Option<String>,
     pub encoding: Encoding,
     pub line_ending: LineEnding,
-    pub search: Vec<u8>,
-    pub replace_with: Vec<u8>,
-    /// Default false (case-insensitive, like nano).
-    pub search_case_sensitive: bool,
     pub tab_width: usize,
     pub insert_spaces: bool,
     pub auto_indent: bool,
@@ -90,9 +85,6 @@ impl Editor {
             path: None,
             encoding: Encoding::Utf8,
             line_ending: LineEnding::CrLf,
-            search: Vec::new(),
-            replace_with: Vec::new(),
-            search_case_sensitive: false,
             tab_width: cfg.tab_width,
             insert_spaces: cfg.insert_spaces,
             auto_indent: cfg.auto_indent,
@@ -102,7 +94,7 @@ impl Editor {
     }
 
     /// Replaces the document with the decoded `bytes`, sets the language from `path`
-    /// and resets cursor, selection and scroll. The cut buffer and search text are kept.
+    /// and resets cursor, selection and scroll. The cut buffer is kept.
     pub fn load(&mut self, path: &str, bytes: &[u8]) {
         self.load_owned(path, bytes.to_vec());
     }
@@ -739,138 +731,178 @@ impl Editor {
 
     // ----- search ----------------------------------------------------------
 
-    fn finder(&self) -> Finder {
-        if self.search_case_sensitive {
-            simd::find
-        } else {
-            simd::find_ascii_ci
+    /// `scope` clamped to the document, or the whole document when None.
+    fn scope_range(&self, scope: Option<(usize, usize)>) -> (usize, usize) {
+        let len = self.buf.len();
+        match scope {
+            Some((lo, hi)) => {
+                let hi = align_back(&self.buf, hi.min(len));
+                (align_back(&self.buf, lo.min(hi)), hi)
+            }
+            None => (0, len),
         }
     }
 
-    /// Finds the next (or previous) match of `search`, starting after the selection (or
-    /// before it when searching backward), wrapping around the document. The match is selected
-    /// (anchor at its start for forward search, at its end for backward search).
-    pub fn find_next(&mut self, forward: bool) -> bool {
-        if self.search.is_empty() {
-            self.message = Some("No search text".to_string());
-            return false;
+    /// Selects a match. Forward searches leave the caret at its end, backward ones at its
+    /// start, so the next search continues from the right side.
+    pub fn select_range(&mut self, start: usize, end: usize, forward: bool) {
+        self.buf.break_undo_group();
+        let (a, c) = if forward { (start, end) } else { (end, start) };
+        self.anchor = (a != c).then_some(a);
+        self.cursor = c;
+        self.preferred_col = None;
+        self.end_affinity = false;
+    }
+
+    /// Finds the next match after the selection (or the previous one before it) inside
+    /// `scope` (the whole document when None), and selects it.
+    pub fn find(
+        &mut self,
+        sr: &mut Searcher,
+        forward: bool,
+        wrap: bool,
+        scope: Option<(usize, usize)>,
+        budget: &mut u64,
+    ) -> Result<Option<Found>, TooComplex> {
+        let (ss, se) = self.selection().unwrap_or((self.cursor, self.cursor));
+        let from = if forward { se } else { ss };
+        let range = self.scope_range(scope);
+        let t = self.buf.make_contiguous();
+        let found = search::find_in(sr, t, range, from, forward, wrap, budget)?;
+        if let Some(f) = found {
+            self.select_range(f.start, f.end, forward);
         }
-        let needle = self.search.clone();
-        let finder = self.finder();
-        let (sel_s, sel_e) = self.selection().unwrap_or((self.cursor, self.cursor));
-        let from = if forward { sel_e } else { sel_s };
-        let hay = self.buf.make_contiguous();
-        let from = from.min(hay.len());
-        let found = if forward {
-            match finder(&hay[from..], &needle) {
-                Some(i) => Some((from + i, false)),
-                None => finder(hay, &needle).map(|i| (i, true)),
-            }
-        } else {
-            match last_before(hay, &needle, from, finder) {
-                Some(m) => Some((m, false)),
-                None => last_before(hay, &needle, hay.len() + 1, finder).map(|m| (m, true)),
-            }
-        };
-        match found {
-            Some((m, wrapped)) => {
-                let n = needle.len();
-                self.buf.break_undo_group();
-                if forward {
-                    self.anchor = Some(m);
-                    self.cursor = m + n;
-                } else {
-                    self.anchor = Some(m + n);
-                    self.cursor = m;
+        Ok(found)
+    }
+
+    /// Replace: when the selection is exactly a match, replaces it, then selects the next
+    /// match. Returns whether something was replaced, the next match, and the scope with its
+    /// end moved by the edit.
+    pub fn replace_next(
+        &mut self,
+        sr: &mut Searcher,
+        wrap: bool,
+        scope: Option<(usize, usize)>,
+        budget: &mut u64,
+    ) -> Result<(bool, Option<Found>, Scope), TooComplex> {
+        let mut scope = scope;
+        let mut replaced = false;
+        if let Some((s, e)) = self.selection() {
+            let (lo, hi) = self.scope_range(scope);
+            if lo <= s && e <= hi {
+                let t = self.buf.make_contiguous();
+                let sub = &t[lo..hi];
+                if sr.matches_exactly(sub, s - lo, e - lo, budget)? {
+                    let mut rep = Vec::new();
+                    sr.expand(sub, &mut rep);
+                    self.replace_compound(s, e, &rep);
+                    self.cursor = s + rep.len();
+                    self.anchor = None;
+                    replaced = true;
+                    scope = scope.map(|(a, b)| (a, (b + rep.len()).saturating_sub(e - s)));
                 }
-                self.preferred_col = None;
-                self.message = if wrapped {
-                    Some("Wrapped".to_string())
-                } else {
-                    None
-                };
-                true
+            }
+        }
+        let found = self.find(sr, true, wrap, scope, budget)?;
+        Ok((replaced, found, scope))
+    }
+
+    /// Replaces every match in `scope` as one undo step. Returns the count and the scope
+    /// with its end moved by the edit. With a scope, the result stays selected.
+    pub fn replace_all(
+        &mut self,
+        sr: &mut Searcher,
+        scope: Option<(usize, usize)>,
+        budget: &mut u64,
+    ) -> Result<(usize, Option<(usize, usize)>), TooComplex> {
+        let range = self.scope_range(scope);
+        let mut track = [self.cursor, self.anchor.unwrap_or(self.cursor), range.1];
+        let t = self.buf.make_contiguous();
+        let Some(r) = search::replace_all(sr, t, range, &mut track, budget)? else {
+            return Ok((0, scope));
+        };
+        self.replace_compound(r.start, r.end, &r.text);
+        let new_scope = scope.map(|_| (range.0, track[2]));
+        match new_scope {
+            Some((lo, hi)) => {
+                self.anchor = (lo != hi).then_some(lo);
+                self.cursor = align_back(&self.buf, hi);
             }
             None => {
-                self.message = Some(format!("Not found: {}", String::from_utf8_lossy(&needle)));
-                false
-            }
-        }
-    }
-
-    /// If the selection equals the search text, replaces it with `replace_with`, then finds
-    /// the next match. Returns whether a match was found.
-    pub fn replace_one(&mut self) -> bool {
-        if let Some((s, e)) = self.selection() {
-            if self.selection_matches_search(s, e) {
-                let rep = self.replace_with.clone();
-                self.replace_compound(s, e, &rep);
-                self.cursor = s + rep.len();
+                self.cursor = align_back(&self.buf, track[0]);
                 self.anchor = None;
             }
         }
-        self.find_next(true)
+        self.preferred_col = None;
+        Ok((r.count, new_scope))
     }
 
-    fn selection_matches_search(&self, s: usize, e: usize) -> bool {
-        if self.search.is_empty() || e - s != self.search.len() {
-            return false;
-        }
-        let sel = self.buf.slice(s, e);
-        if self.search_case_sensitive {
-            sel == self.search
-        } else {
-            sel.eq_ignore_ascii_case(&self.search)
-        }
+    /// Number of matches in `scope`.
+    pub fn count_matches(
+        &mut self,
+        sr: &mut Searcher,
+        scope: Option<(usize, usize)>,
+        budget: &mut u64,
+    ) -> Result<usize, TooComplex> {
+        let range = self.scope_range(scope);
+        let t = self.buf.make_contiguous();
+        search::count(sr, t, range, budget)
     }
 
-    /// Replaces every match in one undo step. Returns the number of replacements.
-    pub fn replace_all(&mut self) -> usize {
-        let n = self.search.len();
-        if n == 0 {
-            return 0;
-        }
-        let needle = self.search.clone();
-        let rep = self.replace_with.clone();
-        let finder = self.finder();
-        let cursor = self.cursor;
-        let (out, count, cursor_new) = {
-            let hay = self.buf.make_contiguous();
-            let mut out = Vec::with_capacity(hay.len());
-            let mut count = 0usize;
-            let mut last = 0usize;
-            let mut shift: isize = 0;
-            let mut inside: Option<usize> = None;
-            while let Some(i) = finder(&hay[last..], &needle) {
-                let m = last + i;
-                out.extend_from_slice(&hay[last..m]);
-                if m < cursor && cursor < m + n {
-                    inside = Some(out.len());
-                } else if m + n <= cursor {
-                    shift += rep.len() as isize - n as isize;
+    /// Matches starting on lines `first..=last` (at most `max`), with replacements when asked,
+    /// for the live preview.
+    pub fn hits(
+        &mut self,
+        sr: &mut Searcher,
+        first: usize,
+        last: usize,
+        max: usize,
+        with_rep: bool,
+        budget: &mut u64,
+    ) -> Result<Vec<Hit>, TooComplex> {
+        let last = last.min(self.buf.line_count() - 1);
+        let from = self.buf.line_start(first.min(last));
+        let limit = self.buf.line_end(last);
+        let t = self.buf.make_contiguous();
+        search::hits(sr, t, from, limit, max, with_rep, budget)
+    }
+
+    /// What each line with a match turns into once the matches are replaced, for the live
+    /// preview: (line, text). `hits` are sorted and carry their replacements. A match that
+    /// runs past its line pulls in the lines it covers. Line breaks in the result show as
+    /// '\u{21B5}' and tabs as spaces. At most `max_chars` chars per line.
+    pub fn preview_lines(&self, hits: &[Hit], max_chars: usize) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        let mut k = 0;
+        while k < hits.len() {
+            let line = self.buf.line_of(hits[k].start);
+            let mut p = self.buf.line_start(line);
+            let mut end = self.buf.line_end(line);
+            let mut text = Vec::new();
+            while k < hits.len() && hits[k].start <= end {
+                let h = &hits[k];
+                k += 1;
+                if h.start < p {
+                    continue;
                 }
-                out.extend_from_slice(&rep);
-                last = m + n;
-                count += 1;
+                text.extend_from_slice(&self.buf.slice(p, h.start));
+                text.extend_from_slice(h.rep.as_deref().unwrap_or(&[]));
+                p = h.end;
+                end = end.max(self.buf.line_end(self.buf.line_of(p)));
             }
-            if count == 0 {
-                return 0;
-            }
-            out.extend_from_slice(&hay[last..]);
-            let cn = inside.unwrap_or_else(|| (cursor as isize + shift).max(0) as usize);
-            (out, count, cn)
-        };
-        self.buf.set_cursor_hint(cursor);
-        self.buf.begin_compound();
-        let len = self.buf.len();
-        self.buf.delete(0, len);
-        self.buf.insert(0, &out);
-        self.buf.end_compound();
-        self.after_edit();
-        self.cursor = align_back(&self.buf, cursor_new);
-        self.anchor = None;
-        self.message = Some(format!("Replaced {count} occurrence(s)"));
-        count
+            text.extend_from_slice(&self.buf.slice(p, end.max(p)));
+            let shown = String::from_utf8_lossy(&text)
+                .chars()
+                .take(max_chars)
+                .map(|c| match c {
+                    '\n' => '\u{21B5}',
+                    '\t' => ' ',
+                    c => c,
+                })
+                .collect();
+            out.push((line, shown));
+        }
+        out
     }
 
     /// 1-based line and column (columns are visual). Clamped to the document.
@@ -1259,6 +1291,39 @@ impl Editor {
 const VIEW_LIMIT_ROWS: usize = 4096;
 
 // ---------------------------------------------------------------------------
+// Save As file names
+// ---------------------------------------------------------------------------
+
+/// Final path for a Save As. `default_ext` (without the dot) is added when the file name has
+/// no extension of its own, so "notes" becomes "notes.txt" while "notes.md" and ".gitignore"
+/// stay as typed. A name ending in '.' asks for no extension: Windows drops trailing dots
+/// from file names, so they are removed here too and nothing is added.
+pub fn save_as_path(chosen: &str, default_ext: Option<&str>) -> String {
+    let name_start = chosen.rfind(['\\', '/']).map_or(0, |i| i + 1);
+    let name = &chosen[name_start..];
+    if name.ends_with('.') {
+        let stem = name.trim_end_matches('.');
+        if stem.is_empty() {
+            return chosen.to_string();
+        }
+        return chosen[..name_start + stem.len()].to_string();
+    }
+    match default_ext {
+        Some(ext) if !has_extension(name) => format!("{chosen}.{ext}"),
+        _ => chosen.to_string(),
+    }
+}
+
+/// True when `name` ends in an extension: a '.' followed by at least one character and no
+/// spaces, the way Windows (PathFindExtension) reads it.
+fn has_extension(name: &str) -> bool {
+    match name.rfind('.') {
+        Some(i) => i + 1 < name.len() && !name[i + 1..].contains(' '),
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 
@@ -1368,31 +1433,6 @@ fn offset_of_vcol(n: usize, col: usize, tw: usize, at: impl Fn(usize) -> u8) -> 
         i += 1;
     }
     n
-}
-
-/// Last match of `needle` whose start is < `limit`. The scan is forward over the window
-/// that can contain such matches, keeping the last hit.
-fn last_before(hay: &[u8], needle: &[u8], limit: usize, finder: Finder) -> Option<usize> {
-    let end = limit
-        .saturating_add(needle.len())
-        .saturating_sub(1)
-        .min(hay.len());
-    let window = &hay[..end];
-    let mut pos = 0usize;
-    let mut last = None;
-    while pos < window.len() {
-        let i = match finder(&window[pos..], needle) {
-            Some(i) => i,
-            None => break,
-        };
-        let abs = pos + i;
-        if abs >= limit {
-            break;
-        }
-        last = Some(abs);
-        pos = abs + 1;
-    }
-    last
 }
 
 /// Maps an old position through a whole-line rewrite of the region [rs, re).
@@ -1533,6 +1573,7 @@ fn comment_token(lang: Lang) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::search::{Mode, Query, FIND_BUDGET};
 
     fn ed(text: &str) -> Editor {
         let mut e = Editor::new(&Config::default());
@@ -2303,9 +2344,8 @@ mod tests {
     #[test]
     fn undo_after_compound_replace_all() {
         let mut e = ed("aXa aXa");
-        e.search = b("a");
-        e.replace_with = b("bb");
-        assert_eq!(e.replace_all(), 4);
+        let mut s = sr("a", "bb", false);
+        assert_eq!(replace_all(&mut e, &mut s, None), 4);
         assert_eq!(text(&e), "bbXbb bbXbb");
         e.undo();
         assert_eq!(text(&e), "aXa aXa");
@@ -2313,84 +2353,105 @@ mod tests {
 
     // ----- search -----------------------------------------------------------
 
+    fn sr(find: &str, replace: &str, match_case: bool) -> Searcher {
+        let q = Query {
+            find: find.to_string(),
+            replace: replace.to_string(),
+            match_case,
+            ..Query::default()
+        };
+        Searcher::new(&q).unwrap()
+    }
+
+    fn find(e: &mut Editor, s: &mut Searcher, forward: bool) -> Option<Found> {
+        let mut b = FIND_BUDGET;
+        e.find(s, forward, true, None, &mut b).unwrap()
+    }
+
+    fn replace_next(e: &mut Editor, s: &mut Searcher) -> (bool, Option<Found>) {
+        let mut b = FIND_BUDGET;
+        let (r, f, _) = e.replace_next(s, true, None, &mut b).unwrap();
+        (r, f)
+    }
+
+    fn replace_all(e: &mut Editor, s: &mut Searcher, scope: Option<(usize, usize)>) -> usize {
+        let mut b = FIND_BUDGET;
+        e.replace_all(s, scope, &mut b).unwrap().0
+    }
+
     #[test]
-    fn find_next_wraps_and_is_case_insensitive() {
+    fn find_wraps_and_is_case_insensitive_by_default() {
         let mut e = ed("foo Bar FOO baz");
-        e.search = b("foo");
-        assert!(e.find_next(true));
+        let mut s = sr("foo", "", false);
+        assert_eq!(find(&mut e, &mut s, true).map(|f| f.wrapped), Some(false));
         assert_eq!(e.selection(), Some((0, 3)));
-        assert_eq!(e.message, None);
-        assert!(e.find_next(true));
+        find(&mut e, &mut s, true);
         assert_eq!(e.selection(), Some((8, 11)), "matches FOO");
-        assert!(e.find_next(true));
+        assert_eq!(find(&mut e, &mut s, true).map(|f| f.wrapped), Some(true));
         assert_eq!(e.selection(), Some((0, 3)));
-        assert_eq!(e.message.as_deref(), Some("Wrapped"));
     }
 
     #[test]
-    fn find_next_case_sensitive() {
+    fn find_match_case() {
         let mut e = ed("foo Foo");
-        e.search = b("Foo");
-        e.search_case_sensitive = true;
-        assert!(e.find_next(true));
+        let mut s = sr("Foo", "", true);
+        find(&mut e, &mut s, true);
         assert_eq!(e.selection(), Some((4, 7)));
-        e.search_case_sensitive = false;
-        e.set_cursor(0, false);
-        assert!(e.find_next(true));
-        assert_eq!(e.selection(), Some((0, 3)), "insensitive matches foo first");
     }
 
     #[test]
-    fn find_next_miss_sets_message_and_keeps_cursor() {
+    fn find_miss_keeps_cursor() {
         let mut e = ed("abc");
         e.set_cursor(1, false);
-        e.search = b("zed");
-        assert!(!e.find_next(true));
+        let mut s = sr("zed", "", false);
+        assert_eq!(find(&mut e, &mut s, true), None);
         assert_eq!(e.cursor, 1);
-        assert_eq!(e.message.as_deref(), Some("Not found: zed"));
     }
 
     #[test]
-    fn find_next_with_empty_search_is_false() {
-        let mut e = ed("abc");
-        assert!(!e.find_next(true));
-    }
-
-    #[test]
-    fn find_next_moves_past_current_selection() {
+    fn find_moves_past_current_selection() {
         let mut e = ed("aa aa");
-        e.search = b("aa");
-        e.search_case_sensitive = true;
-        assert!(e.find_next(true));
+        let mut s = sr("aa", "", true);
+        find(&mut e, &mut s, true);
         assert_eq!(e.selection(), Some((0, 2)));
-        assert!(e.find_next(true));
+        find(&mut e, &mut s, true);
         assert_eq!(e.selection(), Some((3, 5)));
     }
 
     #[test]
     fn find_prev_scans_backward_and_wraps() {
         let mut e = ed("a x a x a");
-        e.search = b("a");
-        e.search_case_sensitive = true;
+        let mut s = sr("a", "", true);
         e.set_cursor(8, false);
-        assert!(e.find_next(false));
+        find(&mut e, &mut s, false);
         assert_eq!(e.selection(), Some((4, 5)));
         assert_eq!(e.cursor, 4, "backward selection has cursor at start");
-        assert!(e.find_next(false));
+        find(&mut e, &mut s, false);
         assert_eq!(e.selection(), Some((0, 1)));
-        assert!(e.find_next(false));
+        assert_eq!(find(&mut e, &mut s, false).map(|f| f.wrapped), Some(true));
         assert_eq!(e.selection(), Some((8, 9)));
-        assert_eq!(e.message.as_deref(), Some("Wrapped"));
     }
 
     #[test]
-    fn replace_one_replaces_selected_match_then_finds_next() {
+    fn find_inside_a_scope_only() {
+        let mut e = ed("x x x x");
+        let mut s = sr("x", "", true);
+        let mut b = FIND_BUDGET;
+        e.find(&mut s, true, true, Some((2, 5)), &mut b).unwrap();
+        assert_eq!(e.selection(), Some((2, 3)));
+        e.find(&mut s, true, true, Some((2, 5)), &mut b).unwrap();
+        assert_eq!(e.selection(), Some((4, 5)));
+        let f = e.find(&mut s, true, true, Some((2, 5)), &mut b).unwrap();
+        assert_eq!(e.selection(), Some((2, 3)), "wraps inside the scope");
+        assert!(f.is_some_and(|f| f.wrapped));
+    }
+
+    #[test]
+    fn replace_next_replaces_selected_match_then_finds_next() {
         let mut e = ed("x x x");
-        e.search = b("x");
-        e.replace_with = b("yy");
-        e.search_case_sensitive = true;
-        assert!(e.find_next(true));
-        assert!(e.replace_one());
+        let mut s = sr("x", "yy", true);
+        find(&mut e, &mut s, true);
+        assert!(replace_next(&mut e, &mut s).0);
         assert_eq!(text(&e), "yy x x");
         assert_eq!(e.selection(), Some((3, 4)), "next match selected");
         e.undo();
@@ -2398,30 +2459,42 @@ mod tests {
     }
 
     #[test]
-    fn replace_one_without_matching_selection_only_finds() {
+    fn replace_next_without_matching_selection_only_finds() {
         let mut e = ed("abc x");
-        e.search = b("x");
-        e.replace_with = b("Q");
-        e.search_case_sensitive = true;
-        assert!(e.replace_one());
+        let mut s = sr("x", "Q", true);
+        let (replaced, found) = replace_next(&mut e, &mut s);
+        assert!(!replaced && found.is_some());
         assert_eq!(text(&e), "abc x", "nothing replaced yet");
         assert_eq!(e.selection(), Some((4, 5)));
+        let (replaced, found) = replace_next(&mut e, &mut s);
         assert!(
-            !e.replace_one(),
+            replaced && found.is_none(),
             "replaces the match, then no further match"
         );
         assert_eq!(text(&e), "abc Q");
         assert_eq!(e.selection(), None);
-        assert!(!e.replace_one());
+    }
+
+    #[test]
+    fn replace_next_with_regex_groups() {
+        let mut e = ed("k=v");
+        let q = Query {
+            find: "(\\w)=(\\w)".to_string(),
+            replace: "$2=$1".to_string(),
+            mode: Mode::Regex,
+            ..Query::default()
+        };
+        let mut s = Searcher::new(&q).unwrap();
+        find(&mut e, &mut s, true);
+        replace_next(&mut e, &mut s);
+        assert_eq!(text(&e), "v=k");
     }
 
     #[test]
     fn replace_all_counts_and_is_single_undo_step() {
         let mut e = ed("ab ab ab");
-        e.search = b("ab");
-        e.replace_with = b("\u{65e5}");
-        e.search_case_sensitive = true;
-        assert_eq!(e.replace_all(), 3);
+        let mut s = sr("ab", "\u{65e5}", true);
+        assert_eq!(replace_all(&mut e, &mut s, None), 3);
         assert_eq!(text(&e), "\u{65e5} \u{65e5} \u{65e5}");
         e.undo();
         assert_eq!(text(&e), "ab ab ab");
@@ -2430,24 +2503,20 @@ mod tests {
     }
 
     #[test]
-    fn replace_all_zero_matches_and_empty_search() {
+    fn replace_all_zero_matches_changes_nothing() {
         let mut e = ed("abc");
-        e.search = b("zz");
-        assert_eq!(e.replace_all(), 0);
+        let mut s = sr("zz", "y", false);
+        assert_eq!(replace_all(&mut e, &mut s, None), 0);
         assert_eq!(text(&e), "abc");
-        e.search.clear();
-        assert_eq!(e.replace_all(), 0);
         assert!(!e.buf.is_dirty());
     }
 
     #[test]
     fn replace_all_maps_cursor_past_replacements() {
         let mut e = ed("a a end");
-        e.search = b("a");
-        e.replace_with = b("xxx");
-        e.search_case_sensitive = true;
+        let mut s = sr("a", "xxx", true);
         e.set_cursor(6, false);
-        e.replace_all();
+        replace_all(&mut e, &mut s, None);
         assert_eq!(text(&e), "xxx xxx end");
         assert_eq!(e.cursor, 10);
     }
@@ -2455,12 +2524,58 @@ mod tests {
     #[test]
     fn replace_all_can_delete_and_insert_newlines() {
         let mut e = ed("a,b,c");
-        e.search = b(",");
-        e.replace_with = b("\n");
-        e.search_case_sensitive = true;
-        assert_eq!(e.replace_all(), 2);
+        let mut s = sr(",", "\n", true);
+        assert_eq!(replace_all(&mut e, &mut s, None), 2);
         assert_eq!(text(&e), "a\nb\nc");
         assert_eq!(e.buf.line_count(), 3);
+    }
+
+    #[test]
+    fn replace_all_in_scope_keeps_the_scope_selected() {
+        let mut e = ed("a a a a");
+        let mut s = sr("a", "bb", true);
+        let mut b = FIND_BUDGET;
+        let (n, scope) = e.replace_all(&mut s, Some((2, 5)), &mut b).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(text(&e), "a bb bb a");
+        assert_eq!(scope, Some((2, 7)));
+        assert_eq!(e.selection(), Some((2, 7)));
+    }
+
+    #[test]
+    fn preview_lines_show_each_line_after_replacement() {
+        let mut e = ed("a1 b2\nnone\nc3\nd4\ne");
+        let q = Query {
+            find: "\\d(\\n.)?".to_string(),
+            replace: "#".to_string(),
+            mode: Mode::Regex,
+            ..Query::default()
+        };
+        let mut s = Searcher::new(&q).unwrap();
+        let mut b = FIND_BUDGET;
+        let h = e.hits(&mut s, 0, 4, 100, true, &mut b).unwrap();
+        // "1" and "2\nn" on line 0 pull in line 1. "3\nd" on line 2 pulls in line 3, and the
+        // "4\ne" match that starts there is shown on line 2's preview too.
+        let lines = e.preview_lines(&h, 80);
+        assert_eq!(lines, [(0, "a# b#one".to_string()), (2, "c##".to_string())]);
+        assert_eq!(e.preview_lines(&h, 3)[0].1, "a# ");
+    }
+
+    #[test]
+    fn hits_cover_the_requested_lines() {
+        let mut e = ed("a1\nb2\nc3");
+        let q = Query {
+            find: "\\d".to_string(),
+            replace: "<$0>".to_string(),
+            mode: Mode::Regex,
+            ..Query::default()
+        };
+        let mut s = Searcher::new(&q).unwrap();
+        let mut b = FIND_BUDGET;
+        let h = e.hits(&mut s, 1, 1, 10, true, &mut b).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!((h[0].start, h[0].end), (4, 5));
+        assert_eq!(h[0].rep.as_deref(), Some(&b"<2>"[..]));
     }
 
     // ----- goto, view, scrolling -------------------------------------------
@@ -2602,6 +2717,35 @@ mod tests {
     }
 
     #[test]
+    fn save_as_adds_the_default_extension_only_when_missing() {
+        let txt = Some("txt");
+        assert_eq!(save_as_path("C:\\d\\asdf", txt), "C:\\d\\asdf.txt");
+        assert_eq!(save_as_path("C:\\d\\asdf.md", txt), "C:\\d\\asdf.md");
+        assert_eq!(save_as_path("C:\\d\\asdf.txt", txt), "C:\\d\\asdf.txt");
+        assert_eq!(save_as_path("C:\\d\\a.b.json", txt), "C:\\d\\a.b.json");
+        assert_eq!(save_as_path("C:\\d\\.gitignore", txt), "C:\\d\\.gitignore");
+        // A dot in a folder name is not the file's extension.
+        assert_eq!(save_as_path("C:\\my.dir\\notes", txt), "C:\\my.dir\\notes.txt");
+        assert_eq!(save_as_path("/home/u.v/notes", txt), "/home/u.v/notes.txt");
+        // Text after the last dot that contains a space is not an extension.
+        assert_eq!(save_as_path("C:\\d\\v1.2 notes", txt), "C:\\d\\v1.2 notes.txt");
+    }
+
+    #[test]
+    fn save_as_trailing_dot_means_no_extension() {
+        assert_eq!(save_as_path("C:\\d\\asdf.", Some("txt")), "C:\\d\\asdf");
+        assert_eq!(save_as_path("C:\\d\\asdf...", Some("txt")), "C:\\d\\asdf");
+        assert_eq!(save_as_path("C:\\d\\asdf.", None), "C:\\d\\asdf");
+        assert_eq!(save_as_path("C:\\d\\..", Some("txt")), "C:\\d\\..");
+    }
+
+    #[test]
+    fn save_as_without_default_extension_keeps_the_name() {
+        assert_eq!(save_as_path("C:\\d\\LICENSE", None), "C:\\d\\LICENSE");
+        assert_eq!(save_as_path("C:\\d\\asdf.md", None), "C:\\d\\asdf.md");
+    }
+
+    #[test]
     fn load_resets_state_and_sets_language() {
         let mut e = ed("hello");
         e.set_cursor(3, true);
@@ -2706,8 +2850,9 @@ mod tests {
         e.move_line(true);
         e.move_line(false);
         e.toggle_comment();
-        assert!(!e.find_next(false));
-        assert_eq!(e.replace_all(), 0);
+        let mut s = sr("x", "y", false);
+        assert_eq!(find(&mut e, &mut s, false), None);
+        assert_eq!(replace_all(&mut e, &mut s, None), 0);
         assert_eq!(e.cut_selection(), None);
         e.delete_forward();
         e.backspace();

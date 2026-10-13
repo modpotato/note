@@ -3,6 +3,8 @@ pub mod buffer;
 pub mod config;
 pub mod editor;
 pub mod encoding;
+pub mod regex;
+pub mod search;
 pub mod simd;
 pub mod syntax;
 #[cfg(windows)]

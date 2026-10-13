@@ -8,15 +8,21 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, DeleteDC, DeleteObject,
-    ExtTextOutW, GetDC, GetStockObject, GetTextExtentPoint32W, GetTextFaceW, GetTextMetricsW,
-    ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, ETO_CLIPPED, ETO_OPAQUE, FF_MODERN,
-    FIXED_PITCH, FW_BOLD, HBITMAP, HDC, HFONT, HGDIOBJ, NONANTIALIASED_QUALITY,
-    OUT_DEFAULT_PRECIS, SRCCOPY, SYSTEM_FONT, TEXTMETRICW, TRANSPARENT,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC,
+    DeleteObject, DrawTextW, ExtTextOutW, GetDC, GetStockObject, GetTextExtentPoint32W,
+    GetTextFaceW, GetTextMetricsW, ReleaseDC, RoundRect, SelectObject, SetBkColor, SetBkMode,
+    SetTextColor, SetViewportOrgEx, ANTIALIASED_QUALITY, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, ETO_CLIPPED, ETO_OPAQUE, FF_DONTCARE, FF_MODERN, FIXED_PITCH, FW_BOLD, FW_NORMAL,
+    HBITMAP, HDC, HFONT, HGDIOBJ, NONANTIALIASED_QUALITY, NULL_PEN, OUT_DEFAULT_PRECIS, SRCCOPY,
+    SYSTEM_FONT, TEXTMETRICW, TRANSPARENT,
 };
 
-use super::{App, Axis, Bars, Layout, Prompt};
+use super::find::Preview;
+use super::{
+    doc_name, App, Axis, Bars, Layout, Prompt, TabHit, TabStrip, TAB_CLOSE_RADIUS_PX,
+    TAB_RADIUS_PX, TAB_SEP_INSET_PX, TAB_TEXT_PAD_PX, TAB_TOP_PX, TAB_CLOSE_SPACE_PX,
+};
 use crate::buffer::Buffer;
 use crate::config::{Action, Config, FontSmoothing, Rgb};
 use crate::editor::{wrap_rows_buf, Editor};
@@ -37,12 +43,12 @@ const HINTS: [(Action, &str); 12] = [
     (Action::Open, "Open"),
     (Action::Find, "Find"),
     (Action::Replace, "Replace"),
-    (Action::CutLine, "Cut"),
-    (Action::Paste, "Paste"),
     (Action::GotoLine, "Goto"),
     (Action::Undo, "Undo"),
     (Action::Redo, "Redo"),
-    (Action::MarkToggle, "Mark"),
+    (Action::CutLine, "Cut Line"),
+    (Action::DuplicateLine, "Duplicate"),
+    (Action::ToggleComment, "Comment"),
     (Action::Exit, "Exit"),
 ];
 /// Source for ETO_OPAQUE fills, which need an empty string.
@@ -67,6 +73,8 @@ pub(super) struct Renderer {
     font: HFONT,
     /// Bold face for keywords and types, or null when `bold_keywords` is off.
     bold: HFONT,
+    /// Segoe UI face for the tab strip.
+    ui_font: HFONT,
     bold_keywords: bool,
     pub(super) char_w: i32,
     pub(super) line_h: i32,
@@ -123,6 +131,7 @@ impl Renderer {
             bmp_h: 0,
             font: null_mut(),
             bold: null_mut(),
+            ui_font: null_mut(),
             bold_keywords: false,
             char_w: 8,
             line_h: 16,
@@ -183,15 +192,17 @@ impl Renderer {
             } else {
                 null_mut()
             };
+            let ui = make_ui_font(dpi);
 
             SelectObject(self.mem, GetStockObject(SYSTEM_FONT));
-            for old in [self.font, self.bold] {
+            for old in [self.font, self.bold, self.ui_font] {
                 if !old.is_null() {
                     DeleteObject(old);
                 }
             }
             self.font = font;
             self.bold = bold;
+            self.ui_font = ui;
             self.bold_keywords = cfg.bold_keywords;
             SelectObject(self.mem, font);
 
@@ -292,7 +303,7 @@ impl Renderer {
     /// Visible text: gutter, current-line tint, selection, syntax-coloured glyphs. Walks
     /// visual rows: one per logical line, or one per wrapped row in wrap mode. Continuation
     /// rows show no line number but a "·" in the gutter.
-    fn draw_text(&mut self, ed: &mut Editor, cfg: &Config, lay: Layout) {
+    fn draw_text(&mut self, ed: &mut Editor, cfg: &Config, lay: Layout, preview: Option<&Preview>) {
         let mem = self.mem;
         let theme = &cfg.theme;
         let tw = ed.tab_width.max(1);
@@ -366,6 +377,36 @@ impl Renderer {
             if cfg.highlight_current_line && line == cur_line {
                 fill(mem, rect(gutter, y, lay.w, y + lh), theme.current_line_bg);
             }
+            if let Some(p) = preview {
+                // Every match in view, under the selection (the current match).
+                // Matches ending exactly at the row start are kept: an empty one belongs here.
+                let k = p.hits.partition_point(|&(_, e)| e < rs);
+                for &(s, e) in p.hits[k..].iter().take_while(|&&(s, _)| s <= re) {
+                    let hit = if last {
+                        s <= le && e > rs
+                    } else {
+                        s < re && e > rs
+                    };
+                    if !hit && !(s == e && s >= rs && s <= re) {
+                        continue;
+                    }
+                    let v0 = if s > rs {
+                        vcol(buf, rs, s.min(re), tw)
+                    } else {
+                        0
+                    };
+                    let v1 = if last && e > le {
+                        vcol(buf, rs, le, tw) + 1
+                    } else {
+                        vcol(buf, rs, e.min(re), tw)
+                    };
+                    // An empty match shows as a thin bar.
+                    let x0 = (gutter + (v0 as i32 - scroll_col as i32) * cw).max(gutter);
+                    let x1 = (gutter + (v1 as i32 - scroll_col as i32) * cw).min(lay.w);
+                    let x1 = x1.max(x0 + (cw / 4).max(2));
+                    fill(mem, rect(x0, y, x1, y + lh), theme.match_bg);
+                }
+            }
             if let Some((s, e)) = sel {
                 let hit = if last {
                     s <= le && e > rs
@@ -427,6 +468,31 @@ impl Renderer {
                 SelectObject(mem, self.font);
             }
 
+            if let Some(p) = preview.filter(|_| last) {
+                // What the line becomes after Replace, after its end.
+                if let Ok(k) = p.lines.binary_search_by_key(&line, |(l, _)| *l) {
+                    let ghost = &p.lines[k].1;
+                    let v = vcol(buf, rs, le, tw) + 2;
+                    let x = gutter + (v as i32 - scroll_col as i32) * cw;
+                    if x < lay.w {
+                        set_text_color(mem, theme.preview_fg);
+                        // SAFETY: ghost outlives the call; the clip keeps it in the text area.
+                        unsafe {
+                            ExtTextOutW(
+                                mem,
+                                x.max(gutter),
+                                y + self.text_dy,
+                                ETO_CLIPPED,
+                                &clip,
+                                ghost.as_ptr(),
+                                ghost.len() as u32,
+                                null(),
+                            );
+                        }
+                    }
+                }
+            }
+
             if gutter > 0 && sub > 0 && wrap {
                 self.put(mem, gutter - 2 * cw, y + self.text_dy, theme.gutter_fg, "\u{00B7}");
             } else if gutter > 0 {
@@ -460,6 +526,115 @@ impl Renderer {
             sub += 1;
         }
         self.rows = rows;
+    }
+
+    /// Paints the tab strip at the top of the back buffer. `shown` lists the visible tabs in
+    /// order as (file name, dirty), and `hot` is the item under the pointer.
+    fn draw_tab_bar(
+        &mut self,
+        cfg: &Config,
+        strip: &TabStrip,
+        shown: &[(&str, bool)],
+        hot: Option<TabHit>,
+    ) {
+        let mem = self.mem;
+        let theme = &cfg.theme;
+        let radius = strip.px(TAB_RADIUS_PX);
+        let hot_tab = hot.and_then(TabHit::tab_index);
+        fill(mem, rect(0, 0, strip.w, strip.h), theme.tabbar_bg);
+        // SAFETY: ui_font is a live font and mem is our DC. The editor face is selected back
+        // at the end of this function.
+        unsafe {
+            SelectObject(mem, self.ui_font);
+        }
+
+        // Backgrounds. The bottom corners run on under the strip and are painted over by the
+        // editor, so the active tab joins the text area.
+        for k in 0..shown.len() {
+            let i = strip.first + k;
+            let s = strip.slot(k);
+            let body = rect(s.left, s.top, s.right, strip.h + radius);
+            if i == strip.active {
+                round_fill(mem, body, radius, theme.bg);
+            } else if hot_tab == Some(i) {
+                round_fill(mem, body, radius, theme.tab_hover_bg);
+            }
+        }
+
+        // A 1px line between two idle tabs. Tabs next to the active or hovered one have none.
+        let idle = |i: usize| i != strip.active && hot_tab != Some(i);
+        for k in 0..shown.len().saturating_sub(1) {
+            if idle(strip.first + k) && idle(strip.first + k + 1) {
+                let x = strip.slot(k).right;
+                let inset = strip.px(TAB_SEP_INSET_PX);
+                let top = strip.px(TAB_TOP_PX) + inset;
+                fill(mem, rect(x, top, x + 1, strip.h - inset), theme.tab_hover_bg);
+            }
+        }
+
+        // Titles, and the close box (active or hovered tab) or dirty dot (other tabs).
+        for (k, &(name, dirty)) in shown.iter().enumerate() {
+            let i = strip.first + k;
+            let s = strip.slot(k);
+            let is_active = i == strip.active;
+            let color = if is_active { theme.fg } else { theme.tab_fg };
+            let mut text = rect(
+                s.left + strip.px(TAB_TEXT_PAD_PX),
+                s.top,
+                s.right - strip.px(TAB_CLOSE_SPACE_PX),
+                strip.h,
+            );
+            self.tmp16.clear();
+            self.tmp16.extend(name.encode_utf16());
+            set_text_color(mem, color);
+            // SAFETY: tmp16 and text are valid for the call; DrawTextW does not keep them.
+            unsafe {
+                DrawTextW(
+                    mem,
+                    self.tmp16.as_ptr(),
+                    self.tmp16.len() as i32,
+                    &mut text,
+                    DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
+            }
+            let close = strip.close_box(k);
+            if is_active || hot_tab == Some(i) {
+                if hot == Some(TabHit::Close(i)) {
+                    round_fill(mem, close, strip.px(TAB_CLOSE_RADIUS_PX), theme.scrollbar_thumb);
+                }
+                self.draw_glyph(mem, close, "\u{00D7}", color);
+            } else if dirty {
+                self.draw_glyph(mem, close, "\u{25CF}", color);
+            }
+        }
+
+        let plus = strip.plus_box();
+        if hot == Some(TabHit::New) {
+            round_fill(mem, plus, strip.px(TAB_CLOSE_RADIUS_PX), theme.scrollbar_thumb);
+        }
+        self.draw_glyph(mem, plus, "+", theme.tab_fg);
+
+        // SAFETY: the editor face is a live font and mem is our DC.
+        unsafe {
+            SelectObject(mem, self.font);
+        }
+    }
+
+    /// One centred glyph in `r`, in `color`, with the selected font.
+    fn draw_glyph(&mut self, dc: HDC, mut r: RECT, s: &str, color: Rgb) {
+        self.tmp16.clear();
+        self.tmp16.extend(s.encode_utf16());
+        set_text_color(dc, color);
+        // SAFETY: tmp16 and r are valid for the call.
+        unsafe {
+            DrawTextW(
+                dc,
+                self.tmp16.as_ptr(),
+                self.tmp16.len() as i32,
+                &mut r,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
     }
 
     /// Status row: the prompt while one is open, else message/file name and position info.
@@ -526,7 +701,7 @@ impl Renderer {
         self.tmp = left;
     }
 
-    /// Two rows of nano-style "KEY Label" pairs.
+    /// Two rows of "KEY Label" pairs.
     fn draw_hints(&mut self, cfg: &Config, lay: Layout) {
         let mem = self.mem;
         let theme = &cfg.theme;
@@ -637,7 +812,7 @@ impl Drop for Renderer {
                 return;
             }
             SelectObject(self.mem, GetStockObject(SYSTEM_FONT));
-            for font in [self.font, self.bold] {
+            for font in [self.font, self.bold, self.ui_font] {
                 if !font.is_null() {
                     DeleteObject(font);
                 }
@@ -696,9 +871,6 @@ pub(super) fn caret_spot(app: &App, lay: Layout) -> Option<(i32, i32)> {
         return None;
     }
     if let Some(p) = &app.prompt {
-        if !p.kind.takes_text() {
-            return None;
-        }
         let labels = p.label.chars().count() as i32;
         let before = p.text[..p.cursor].chars().count() as i32;
         return Some((lay.cw + (labels + before) * lay.cw, lay.text_h));
@@ -722,11 +894,14 @@ pub(super) fn caret_spot(app: &App, lay: Layout) -> Option<(i32, i32)> {
 /// Paints one frame into the back buffer and copies `clip` of it to `hdc`.
 pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
     let lay = app.layout();
+    app.update_find_preview(lay.rows);
     let spot = caret_spot(app, lay);
     let zoom = app.zoom_pct();
     let bars = app.scroll_bars(lay);
     let hover = app.sb_hover;
     let drag = app.sb_drag.map(|d| d.axis);
+    let strip = app.tab_strip();
+    let hot = app.tab_hot;
     let App {
         editor,
         config,
@@ -735,13 +910,35 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
         show_help,
         help_scroll,
         caret_visible,
+        find,
+        tabs,
+        active,
         ..
     } = app;
 
-    renderer.ensure_bitmap(lay.w, lay.h);
+    // The back buffer covers the whole client area: the tab strip, then the editor below it.
+    renderer.ensure_bitmap(lay.w, lay.h + lay.tabbar_h);
     let mem = renderer.mem;
     if mem.is_null() || renderer.bmp.is_null() {
         return;
+    }
+    // SAFETY: mem is our memory DC. The strip is drawn with the viewport at the origin.
+    unsafe {
+        SetViewportOrgEx(mem, 0, 0, null_mut());
+    }
+    if let Some(strip) = strip {
+        let shown: Vec<(&str, bool)> = (0..strip.count)
+            .map(|k| {
+                let i = strip.first + k;
+                let ed: &Editor = if i == *active {
+                    &*editor
+                } else {
+                    tabs.get(i).unwrap_or(&*editor)
+                };
+                (doc_name(ed), ed.is_dirty())
+            })
+            .collect();
+        renderer.draw_tab_bar(config, &strip, &shown, hot);
     }
     // Tell the highlighter which line changed since the last paint.
     let dirty = editor.buf.take_first_dirty_line();
@@ -749,13 +946,15 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
         editor.highlighter.invalidate_from(dirty);
     }
 
-    // SAFETY: mem is our memory DC with the bitmap and font selected.
+    // SAFETY: mem is our memory DC with the bitmap and font selected. Everything below the
+    // strip is drawn in editor coordinates, offset by the strip height.
     unsafe {
+        SetViewportOrgEx(mem, 0, lay.tabbar_h, null_mut());
         SelectObject(mem, renderer.font);
         SetBkMode(mem, TRANSPARENT as i32);
     }
     fill(mem, rect(0, 0, lay.w, lay.h), config.theme.bg);
-    renderer.draw_text(editor, config, lay);
+    renderer.draw_text(editor, config, lay, find.preview());
     paint_scrollbars(mem, config, lay, bars, hover, drag);
     renderer.draw_status(editor, config, lay, prompt.as_ref(), zoom);
     if config.show_hints {
@@ -774,8 +973,10 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
         }
     }
 
-    // SAFETY: both DCs are valid; the copied rectangle lies inside the back buffer.
+    // SAFETY: both DCs are valid; the copied rectangle lies inside the back buffer. The
+    // viewport goes back to the origin first, since it also offsets the copy's source.
     unsafe {
+        SetViewportOrgEx(mem, 0, 0, null_mut());
         BitBlt(
             hdc,
             clip.left,
@@ -853,6 +1054,49 @@ pub(super) fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
         top,
         right,
         bottom,
+    }
+}
+
+/// Segoe UI 9pt at `dpi`, for the tab strip. The caller owns the font.
+fn make_ui_font(dpi: u32) -> HFONT {
+    let mut name = to_utf16("Segoe UI");
+    name.push(0);
+    // SAFETY: `name` is NUL-terminated and lives across the call.
+    unsafe {
+        CreateFontW(
+            -((9 * dpi as i32 + 36) / 72),
+            0,
+            0,
+            0,
+            FW_NORMAL as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            (DEFAULT_PITCH | FF_DONTCARE) as u32,
+            name.as_ptr(),
+        )
+    }
+}
+
+/// Fills `r` with `c`, its corners rounded by `radius`, with no outline.
+fn round_fill(dc: HDC, r: RECT, radius: i32, c: Rgb) {
+    if r.right <= r.left || r.bottom <= r.top {
+        return;
+    }
+    // SAFETY: the brush and the stock pen are selected only while the shape is drawn, the
+    // objects they replace are restored, and the brush is deleted once it is unselected.
+    unsafe {
+        let brush = CreateSolidBrush(c.colorref());
+        let old_brush = SelectObject(dc, brush);
+        let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, r.left, r.top, r.right, r.bottom, radius * 2, radius * 2);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(brush);
     }
 }
 
