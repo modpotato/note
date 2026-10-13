@@ -106,6 +106,10 @@ pub struct Theme {
     pub scrollbar_thumb_hover: Rgb,
     /// Scrollbar strip, painted only while the pointer is on the bar or dragging it.
     pub scrollbar_track: Rgb,
+    /// Live preview of the Find/Replace dialog: background of every match in view, and the
+    /// text that shows what a line becomes after Replace.
+    pub match_bg: Rgb,
+    pub preview_fg: Rgb,
     /// Indexed by `Tok as usize`. `tok[0] == fg` always.
     pub tok: [Rgb; TOK_COUNT],
 }
@@ -129,6 +133,8 @@ impl Theme {
             scrollbar_thumb: Rgb(0x3a, 0x3a, 0x42),
             scrollbar_thumb_hover: Rgb(0x55, 0x55, 0x5f),
             scrollbar_track: Rgb(0x1f, 0x1f, 0x24),
+            match_bg: Rgb(0x5c, 0x3a, 0x12),
+            preview_fg: Rgb(0x8f, 0xc7, 0x8f),
             tok: [
                 fg,                    // normal
                 Rgb(0x56, 0x9c, 0xd6), // keyword
@@ -162,6 +168,8 @@ impl Theme {
             scrollbar_thumb: Rgb(0xc4, 0xc4, 0xc8),
             scrollbar_thumb_hover: Rgb(0xa0, 0xa0, 0xa8),
             scrollbar_track: Rgb(0xec, 0xec, 0xee),
+            match_bg: Rgb(0xff, 0xd9, 0xa8),
+            preview_fg: Rgb(0x2e, 0x7d, 0x32),
             tok: [
                 fg,                    // normal
                 Rgb(0x00, 0x00, 0xff), // keyword
@@ -194,6 +202,8 @@ impl Theme {
             ("scrollbar_thumb", self.scrollbar_thumb),
             ("scrollbar_thumb_hover", self.scrollbar_thumb_hover),
             ("scrollbar_track", self.scrollbar_track),
+            ("match_bg", self.match_bg),
+            ("preview_fg", self.preview_fg),
         ];
         v.extend(TOKEN_NAMES.iter().copied().zip(self.tok.iter().copied()));
         v
@@ -219,6 +229,8 @@ impl Theme {
             "scrollbar_thumb" => self.scrollbar_thumb = c,
             "scrollbar_thumb_hover" => self.scrollbar_thumb_hover = c,
             "scrollbar_track" => self.scrollbar_track = c,
+            "match_bg" => self.match_bg = c,
+            "preview_fg" => self.preview_fg = c,
             other => match TOKEN_NAMES.iter().position(|&n| n == other) {
                 Some(i) => self.tok[i] = c,
                 None => return false,

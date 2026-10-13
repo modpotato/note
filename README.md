@@ -1,8 +1,9 @@
 # note
 
 An ultra-light Notepad replacement for Windows. Pure Win32 and GDI, dark by default, the
-usual Notepad keys plus a few line-editing extras, and no tabs, menus or frameworks. The release executable is about 730 KB (font,
-icon and C runtime included); the installer is about 460 KB.
+usual Notepad keys plus a few line-editing extras, and no tabs, menus or frameworks. The
+release executable is about 870 KB (font, icon and C runtime included); the installer is
+about 520 KB.
 
 - **Pure Win32 / GDI.** One window, one document, a double-buffered GDI renderer that paints
   only the visible lines.
@@ -10,11 +11,15 @@ icon and C runtime included); the installer is about 460 KB.
 - **Notepad keys, plus extras.** `Ctrl+S`, `Ctrl+A`, `Ctrl+C`/`V`/`X`, `Ctrl+Z`/`Y`, `Ctrl+F`,
   `Ctrl+H` and `Ctrl+G` work as in Notepad. On top of that, `Ctrl+K` cuts the line, `Ctrl+D`
   duplicates it and `Alt+Up`/`Alt+Down` move it. `F1` lists every key.
+- **Find and replace like EmEditor.** Regular expressions with lookaround, back-references,
+  named groups and case conversion in the replacement, plus escape sequences, number ranges
+  and fuzzy matching. A live preview shows every match and what each line becomes, and regex
+  syntax completes as you type. The regex engine is built in, so there are no dependencies.
 - **SIMD.** Byte scans (newline counting, search, line endings, ASCII checks) use SSE2 and
   AVX2, with AVX2 chosen at runtime.
 - **Syntax highlighting** for about 20 languages, computed incrementally.
-- **Small.** About 730 KB as a single exe with a static CRT, icon and Paper Mono embedded
-  (about 520 KB without the font). No runtime DLLs beyond the Windows system DLLs.
+- **Small.** About 870 KB as a single exe with a static CRT, icon and Paper Mono embedded
+  (about 660 KB without the font). No runtime DLLs beyond the Windows system DLLs.
 
 ## Install
 
@@ -145,6 +150,62 @@ extends the selection. `^K` without a selection cuts the whole line; pressing it
 appends the next line to the same clipboard text, so `^K ^K ^K` then `^V` moves three lines.
 `M-A` starts a mark: every movement extends the selection until you press it again or `Esc`.
 
+## Find and replace
+
+`^F` opens the Find dialog and `^H` opens Replace. Selected text on one line becomes the Find
+text; a selection over several lines turns on "In the Selection Only". In the dialog, `Enter`
+is Find Next, `F3` and `S-F3` search forward and back, `^F` and `^H` switch between Find and
+Replace, and `Esc` closes it. With the dialog closed, `F3` and `S-F3` repeat the last search.
+Each box keeps its last 20 entries in its drop-down list.
+
+Options:
+
+- **Match Case**, **Match Whole Word**. A whole-word match cannot start or end inside a word.
+- **Incremental Search** selects the first match while you type.
+- **Live Preview** highlights every match in view. In Replace mode it also shows, after the end
+  of each line, what that line becomes (`→ ...`). The status line counts the matches as you type.
+- **In the Selection Only** searches and replaces inside the selection the dialog was opened
+  with.
+- **Wrap Around** continues from the other end of the file (or selection).
+- **Close when Finished** closes the dialog after a match is found or Replace All runs.
+- **Preserve Case** re-cases the replacement like the text it replaces: `cat` → `dog` turns
+  `Cat` into `Dog` and `CAT` into `DOG`.
+
+Modes:
+
+- **(None)**: plain text.
+- **Regular Expressions**: see below. The `>` buttons open a menu of tokens, and typing `\`,
+  `(?`, `[:` or `$` opens a completion list (`↑`/`↓` to choose, `Tab` or `Enter` to insert).
+  Back-reference and group-name completions come from the groups in the Find pattern.
+- **Escape Sequence**: plain text with `\n`, `\t`, `\\`, `\xHH` and `\x{HHHH}`.
+- **Number Range**: finds numbers in a range. Enter `10-20`, `1.5..3`, `>=100`, `<0`, `..50`
+  or a single number. Decimals and negative numbers are understood.
+- **Fuzzy Matching** (with (None) or Escape Sequence) allows about one typo per four
+  characters: a changed, missing, extra or swapped letter. `receive` finds `recieve`.
+
+Regular expressions:
+
+| Syntax | Meaning |
+| --- | --- |
+| `.` `\d` `\w` `\s` `\h` | any char (not a line break), digit, word char, whitespace, space or tab; `\D` `\W` `\S` `\H` negate |
+| `[abc]` `[^a-z]` `[[:alpha:]]` | character classes, with ranges and POSIX names |
+| `^` `$` `\b` `\<` `\>` `\A` `\z` | line start and end, word boundary, word start and end, text start and end |
+| `*` `+` `?` `{n,m}` | repeats; add `?` for as few as possible, `+` to never give back |
+| `(...)` `(?:...)` `(?<name>...)` `\|` | groups and alternatives |
+| `\1` `\k<name>` | text of a group |
+| `(?=...)` `(?!...)` `(?<=...)` `(?<!...)` | followed by, not followed by, preceded by, not preceded by (any length) |
+| `(?>...)` | atomic group |
+| `(?i)` `(?s)` `(?m)` `(?x)` | ignore case, `.` matches line breaks, `^`/`$` per line (on by default), ignore spaces and `#` comments |
+| `\n` `\t` `\r\n` `\R` `\xHH` `\x{HHHH}` `\Q...\E` | line break, tab, any line break, char by hex code, literal text |
+
+Replacement text in regex mode: `$0` or `$&` for the whole match, `$1` or `\1` for a group,
+`${name}` for a named group, `$$` for a dollar sign, `\n` and `\t`, and the case conversions
+`\U` (upper from here), `\L` (lower from here), `\E` (end), `\u` and `\l` (next char only).
+For example, find `(\w+)@(\w+)` and replace with `\U$2\E: $1`.
+
+Every search has a step budget, so a pattern that would take too long stops with a message
+instead of freezing the editor. Replace All is one undo step.
+
 ## Configuration
 
 Settings live in `%APPDATA%\note\note.ini`. The file is created with the defaults on first
@@ -178,8 +239,9 @@ Chords can be written in nano notation (`^S-Z`) or by name (`ctrl+shift+z`, `alt
 `f3`). Colour keys are the theme names: `bg`, `fg`, `caret`, `selection_bg`,
 `current_line_bg`, `gutter_bg`, `gutter_fg`, `status_bg`, `status_fg`, `hint_key_fg`,
 `hint_fg`, the scrollbar colours `scrollbar_thumb`, `scrollbar_thumb_hover` and
-`scrollbar_track`, and the token colours `keyword`, `type`, `string`, `number`, `comment`,
-`preproc`, `function`, `punct`, `heading`.
+`scrollbar_track`, the live preview colours `match_bg` and `preview_fg`, and the token
+colours `keyword`, `type`, `string`, `number`, `comment`, `preproc`, `function`, `punct`,
+`heading`.
 
 Font keys in `[editor]`:
 
@@ -226,6 +288,9 @@ runs and is tested on any host.
   line.
 - **Renderer** paints into a memory bitmap and copies it to the window once per paint. Only
   visible lines are drawn.
+- **Regex engine** compiles a pattern to a small instruction list and runs it with a
+  backtracking VM over the UTF-8 text, skipping ahead with SIMD when the pattern starts with
+  literal text. The live preview only searches the lines in view.
 
 The module contracts and the reasoning behind them are in [DESIGN.md](DESIGN.md).
 
@@ -237,8 +302,8 @@ Measure load, index and lex throughput on a real file:
 cargo run --release --example bench -- <file>
 ```
 
-It reports the ASCII check, a plain copy for comparison, decode, line indexing, a byte count
-and a full lex pass.
+It reports the ASCII check, a plain copy for comparison, decode, line indexing, a byte count,
+a full lex pass and find-all times for a few plain and regex queries.
 
 ## Releasing
 
@@ -263,7 +328,11 @@ publishes the version in `Cargo.toml` as it is, and a minor or major release bum
 
 ## Known limitations
 
-- Soft wrap (`M-L`) breaks lines at word boundaries and is visual only. The vertical
+- Soft wrap (`M-Z`) breaks lines at word boundaries and is visual only. The vertical
   scrollbar still counts logical lines.
 - CJK and other wide characters take one cell.
 - One document per window, by design. Open another copy of the app for another file.
+- Regex: no Unicode properties (`\p{...}`), recursion or conditionals. Line breaks in the
+  text are `\n` whatever the file uses, so `\r` matches only a stray carriage return.
+- The Find/Replace dialog uses the light system style, even with the dark theme. Its options
+  and history last until the editor closes.

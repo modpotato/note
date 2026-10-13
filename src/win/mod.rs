@@ -1,6 +1,7 @@
 //! Win32 window layer: application state, window procedure, keyboard and mouse input,
 //! nano-style prompts, file I/O and the clipboard. Painting lives in `render`.
 
+mod find;
 #[cfg(feature = "embed-font")]
 mod fonts;
 mod render;
@@ -217,6 +218,9 @@ pub fn run() {
         // message was posted), and the process then exits immediately.
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if find::pre_translate(&msg) {
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if IsWindow(hwnd) == 0 {
@@ -344,6 +348,7 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option
         WM_MOUSEWHEEL => app.on_wheel(hwnd, wp),
         WM_MOUSEHWHEEL => app.on_hwheel(hwnd, wp),
         WM_DROPFILES => app.on_drop(hwnd, wp as HDROP),
+        find::WM_FIND => app.on_find_msg(hwnd, wp),
         _ => return None,
     }
     Some(0)
@@ -500,22 +505,14 @@ enum Pending {
 
 #[derive(Clone)]
 enum PromptKind {
-    Search,
-    ReplaceSearch,
-    ReplaceWith,
     GotoLine,
-    ReplaceConfirm,
     Confirm(Pending),
 }
 
 impl PromptKind {
     /// Text prompts take a line of input; the others only take single keys.
     fn takes_text(&self) -> bool {
-        !matches!(self, PromptKind::ReplaceConfirm | PromptKind::Confirm(_))
-    }
-
-    fn is_search(&self) -> bool {
-        matches!(self, PromptKind::Search | PromptKind::ReplaceSearch)
+        !matches!(self, PromptKind::Confirm(_))
     }
 }
 
@@ -561,14 +558,9 @@ impl Prompt {
     }
 }
 
-fn prompt_label(kind: &PromptKind, case_sensitive: bool) -> String {
-    let tag = if case_sensitive { " [Case]" } else { "" };
+fn prompt_label(kind: &PromptKind) -> String {
     match kind {
-        PromptKind::Search => format!("Search{tag}: "),
-        PromptKind::ReplaceSearch => format!("Search (to replace){tag}: "),
-        PromptKind::ReplaceWith => "Replace with: ".to_string(),
         PromptKind::GotoLine => "Enter line number, column number: ".to_string(),
-        PromptKind::ReplaceConfirm => "Replace this instance? (Y)es (N)o (A)ll (Esc)".to_string(),
         PromptKind::Confirm(_) => "Save modified buffer? (Y)es (N)o (C)ancel".to_string(),
     }
 }
@@ -602,6 +594,8 @@ struct App {
     caret_visible: bool,
     focused: bool,
     prompt: Option<Prompt>,
+    /// Find/Replace dialog state and its live preview.
+    find: find::FindUi,
     /// Left button is held after a click in the text area.
     drag: bool,
     show_help: bool,
@@ -651,6 +645,7 @@ impl App {
             caret_visible: true,
             focused: false,
             prompt: None,
+            find: find::FindUi::new(),
             drag: false,
             show_help: false,
             help_scroll: 0,
@@ -1072,14 +1067,6 @@ impl App {
                     }
                 }
             }
-            0x43 if m.alt && kind.is_search() => {
-                // Alt+C toggles case sensitivity for the search text.
-                self.editor.search_case_sensitive = !self.editor.search_case_sensitive;
-                let cs = self.editor.search_case_sensitive;
-                if let Some(p) = self.prompt.as_mut() {
-                    p.label = prompt_label(&p.kind, cs);
-                }
-            }
             _ => {
                 let Some(p) = self.prompt.as_mut() else {
                     return false;
@@ -1104,7 +1091,6 @@ impl App {
     fn confirm_key(&mut self, hwnd: HWND, kind: PromptKind, vk: u16) {
         const KEY_Y: u16 = b'Y' as u16;
         const KEY_N: u16 = b'N' as u16;
-        const KEY_A: u16 = b'A' as u16;
         const KEY_C: u16 = b'C' as u16;
         match kind {
             PromptKind::Confirm(pending) => match vk {
@@ -1121,22 +1107,7 @@ impl App {
                 KEY_C | VK_ESCAPE => self.prompt = None,
                 _ => {}
             },
-            PromptKind::ReplaceConfirm => {
-                let more = match vk {
-                    KEY_Y => self.editor.replace_one(),
-                    KEY_N => self.editor.find_next(true),
-                    KEY_A => {
-                        self.editor.replace_all();
-                        false
-                    }
-                    VK_ESCAPE => false,
-                    _ => true,
-                };
-                if !more {
-                    self.prompt = None;
-                }
-            }
-            _ => {}
+            PromptKind::GotoLine => {}
         }
         self.after_command(hwnd);
     }
@@ -1147,25 +1118,6 @@ impl App {
             return;
         };
         match prompt.kind {
-            PromptKind::Search => {
-                self.editor.search = prompt.text.into_bytes();
-                self.editor.find_next(true);
-            }
-            PromptKind::ReplaceSearch => {
-                if prompt.text.is_empty() {
-                    self.editor.message = Some("No search text".to_string());
-                } else {
-                    self.editor.search = prompt.text.into_bytes();
-                    let prefill = String::from_utf8_lossy(&self.editor.replace_with).into_owned();
-                    self.open_prompt(PromptKind::ReplaceWith, prefill);
-                }
-            }
-            PromptKind::ReplaceWith => {
-                self.editor.replace_with = prompt.text.into_bytes();
-                if self.editor.find_next(true) {
-                    self.open_prompt(PromptKind::ReplaceConfirm, String::new());
-                }
-            }
             PromptKind::GotoLine => {
                 let mut parts = prompt.text.split(',');
                 let line = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
@@ -1178,13 +1130,13 @@ impl App {
                     None => self.editor.message = Some("Invalid line number".to_string()),
                 }
             }
-            PromptKind::ReplaceConfirm | PromptKind::Confirm(_) => {}
+            PromptKind::Confirm(_) => {}
         }
         self.after_command(hwnd);
     }
 
     fn open_prompt(&mut self, kind: PromptKind, text: String) {
-        let label = prompt_label(&kind, self.editor.search_case_sensitive);
+        let label = prompt_label(&kind);
         let cursor = text.len();
         self.prompt = Some(Prompt {
             kind,
@@ -1268,16 +1220,10 @@ impl App {
             Action::Paste => self.paste(hwnd),
             Action::Copy => self.copy(hwnd),
             Action::Cut => self.cut(hwnd),
-            Action::Find => {
-                let text = String::from_utf8_lossy(&self.editor.search).into_owned();
-                self.open_prompt(PromptKind::Search, text);
-            }
-            Action::FindNext => self.find_repeat(true),
-            Action::FindPrev => self.find_repeat(false),
-            Action::Replace => {
-                let text = String::from_utf8_lossy(&self.editor.search).into_owned();
-                self.open_prompt(PromptKind::ReplaceSearch, text);
-            }
+            Action::Find => self.open_find(hwnd, false),
+            Action::FindNext => self.find_again(hwnd, true),
+            Action::FindPrev => self.find_again(hwnd, false),
+            Action::Replace => self.open_find(hwnd, true),
             Action::GotoLine => self.open_prompt(PromptKind::GotoLine, String::new()),
             Action::ShowPosition => self.show_position(),
             Action::Help => {
@@ -1335,15 +1281,6 @@ impl App {
                     ed.message = Some("Mark Unset".to_string());
                 }
             }
-        }
-    }
-
-    /// Repeats the last search, or asks for one when there is none yet.
-    fn find_repeat(&mut self, forward: bool) {
-        if self.editor.search.is_empty() {
-            self.open_prompt(PromptKind::Search, String::new());
-        } else {
-            self.editor.find_next(forward);
         }
     }
 

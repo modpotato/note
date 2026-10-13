@@ -16,6 +16,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS, SRCCOPY, SYSTEM_FONT, TEXTMETRICW, TRANSPARENT,
 };
 
+use super::find::Preview;
 use super::{App, Axis, Bars, Layout, Prompt};
 use crate::buffer::Buffer;
 use crate::config::{Action, Config, FontSmoothing, Rgb};
@@ -292,7 +293,7 @@ impl Renderer {
     /// Visible text: gutter, current-line tint, selection, syntax-coloured glyphs. Walks
     /// visual rows: one per logical line, or one per wrapped row in wrap mode. Continuation
     /// rows show no line number but a "·" in the gutter.
-    fn draw_text(&mut self, ed: &mut Editor, cfg: &Config, lay: Layout) {
+    fn draw_text(&mut self, ed: &mut Editor, cfg: &Config, lay: Layout, preview: Option<&Preview>) {
         let mem = self.mem;
         let theme = &cfg.theme;
         let tw = ed.tab_width.max(1);
@@ -366,6 +367,36 @@ impl Renderer {
             if cfg.highlight_current_line && line == cur_line {
                 fill(mem, rect(gutter, y, lay.w, y + lh), theme.current_line_bg);
             }
+            if let Some(p) = preview {
+                // Every match in view, under the selection (the current match).
+                // Matches ending exactly at the row start are kept: an empty one belongs here.
+                let k = p.hits.partition_point(|&(_, e)| e < rs);
+                for &(s, e) in p.hits[k..].iter().take_while(|&&(s, _)| s <= re) {
+                    let hit = if last {
+                        s <= le && e > rs
+                    } else {
+                        s < re && e > rs
+                    };
+                    if !hit && !(s == e && s >= rs && s <= re) {
+                        continue;
+                    }
+                    let v0 = if s > rs {
+                        vcol(buf, rs, s.min(re), tw)
+                    } else {
+                        0
+                    };
+                    let v1 = if last && e > le {
+                        vcol(buf, rs, le, tw) + 1
+                    } else {
+                        vcol(buf, rs, e.min(re), tw)
+                    };
+                    // An empty match shows as a thin bar.
+                    let x0 = (gutter + (v0 as i32 - scroll_col as i32) * cw).max(gutter);
+                    let x1 = (gutter + (v1 as i32 - scroll_col as i32) * cw).min(lay.w);
+                    let x1 = x1.max(x0 + (cw / 4).max(2));
+                    fill(mem, rect(x0, y, x1, y + lh), theme.match_bg);
+                }
+            }
             if let Some((s, e)) = sel {
                 let hit = if last {
                     s <= le && e > rs
@@ -425,6 +456,31 @@ impl Renderer {
             // SAFETY: self.font is a live font and `mem` is our DC.
             unsafe {
                 SelectObject(mem, self.font);
+            }
+
+            if let Some(p) = preview.filter(|_| last) {
+                // What the line becomes after Replace, after its end.
+                if let Ok(k) = p.lines.binary_search_by_key(&line, |(l, _)| *l) {
+                    let ghost = &p.lines[k].1;
+                    let v = vcol(buf, rs, le, tw) + 2;
+                    let x = gutter + (v as i32 - scroll_col as i32) * cw;
+                    if x < lay.w {
+                        set_text_color(mem, theme.preview_fg);
+                        // SAFETY: ghost outlives the call; the clip keeps it in the text area.
+                        unsafe {
+                            ExtTextOutW(
+                                mem,
+                                x.max(gutter),
+                                y + self.text_dy,
+                                ETO_CLIPPED,
+                                &clip,
+                                ghost.as_ptr(),
+                                ghost.len() as u32,
+                                null(),
+                            );
+                        }
+                    }
+                }
             }
 
             if gutter > 0 && sub > 0 && wrap {
@@ -722,6 +778,7 @@ pub(super) fn caret_spot(app: &App, lay: Layout) -> Option<(i32, i32)> {
 /// Paints one frame into the back buffer and copies `clip` of it to `hdc`.
 pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
     let lay = app.layout();
+    app.update_find_preview(lay.rows);
     let spot = caret_spot(app, lay);
     let zoom = app.zoom_pct();
     let bars = app.scroll_bars(lay);
@@ -735,6 +792,7 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
         show_help,
         help_scroll,
         caret_visible,
+        find,
         ..
     } = app;
 
@@ -755,7 +813,7 @@ pub(super) fn paint(app: &mut App, hdc: HDC, clip: RECT) {
         SetBkMode(mem, TRANSPARENT as i32);
     }
     fill(mem, rect(0, 0, lay.w, lay.h), config.theme.bg);
-    renderer.draw_text(editor, config, lay);
+    renderer.draw_text(editor, config, lay, find.preview());
     paint_scrollbars(mem, config, lay, bars, hover, drag);
     renderer.draw_status(editor, config, lay, prompt.as_ref(), zoom);
     if config.show_hints {

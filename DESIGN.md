@@ -10,14 +10,17 @@ Crate layout (library + thin binary so everything but `win/` is unit-testable on
 ```
 src/main.rs      #![windows_subsystem = "windows"]; on windows calls note::win::run(); else prints a message
 src/lib.rs       pub mod simd; pub mod buffer; pub mod syntax; pub mod config; pub mod editor; pub mod encoding;
-                 #[cfg(windows)] pub mod win;
+                 pub mod regex; pub mod search; #[cfg(windows)] pub mod win;
 src/simd.rs      SIMD byte kernels (SSE2 baseline, AVX2 runtime-dispatched)
 src/encoding.rs  file bytes <-> internal UTF-8 (+ line ending detection)
 src/buffer.rs    gap buffer + line index + undo/redo
 src/syntax.rs    tiny incremental lexer-highlighter
 src/config.rs    INI parsing, theme, keymap
+src/regex.rs     small backtracking regex engine + replacement templates
+src/search.rs    find/replace queries (plain, escapes, regex, number range, fuzzy) and scans
 src/editor.rs    platform-independent editor state & commands
 src/win/mod.rs   window, message loop, input -> editor::Command, dialogs, clipboard
+src/win/find.rs  Find/Replace dialog (in-memory template), live preview, regex completions
 src/win/render.rs GDI double-buffered painting
 ```
 
@@ -189,6 +192,8 @@ pub struct Theme {
     pub bg: Rgb, pub fg: Rgb, pub caret: Rgb, pub selection_bg: Rgb, pub current_line_bg: Rgb,
     pub gutter_bg: Rgb, pub gutter_fg: Rgb, pub status_bg: Rgb, pub status_fg: Rgb,
     pub hint_key_fg: Rgb, pub hint_fg: Rgb,
+    pub scrollbar_thumb: Rgb, pub scrollbar_thumb_hover: Rgb, pub scrollbar_track: Rgb,
+    pub match_bg: Rgb, pub preview_fg: Rgb,   // live preview: match background, line-after-replace text
     pub tok: [Rgb; syntax::TOK_COUNT],   // indexed by Tok as usize; tok[0] == fg
 }
 impl Theme { pub fn dark() -> Theme; pub fn light() -> Theme; }
@@ -291,6 +296,64 @@ Default keymap: Windows Notepad keys plus line-editing extras:
 keymap; the window layer handles them directly and extends the selection.)
 
 ---------------------------------------------------------------------------
+## regex.rs — backtracking regex engine
+
+```rust
+pub struct Options { pub ignore_case: bool, pub whole_word: bool, pub literal: bool }
+pub struct Error { pub pos: usize /* char index in the pattern */, pub msg: String }
+pub struct TooComplex;                       // the step budget ran out
+impl Regex {
+    pub fn new(pattern: &str, opts: Options) -> Result<Regex, Error>;
+    pub fn find_at(&self, t: &[u8], from: usize, limit: usize, caps: &mut Captures, budget: &mut u64)
+        -> Result<Option<(usize, usize)>, TooComplex>;   // first match starting in from..=limit
+    pub fn rfind_before(&self, t: &[u8], lo: usize, before: usize, caps, budget) -> ...; // last start in lo..before
+    pub fn match_at(&self, t: &[u8], s: usize, caps, budget) -> Result<Option<usize>, TooComplex>;
+    pub fn group_count(&self) -> usize; pub fn group_names(&self) -> impl Iterator<Item = (&str, usize)>;
+}
+impl Template { pub fn literal(s) -> Template; pub fn escapes(s) -> Result<..>; pub fn regex(s, &Regex) -> Result<..>;
+                pub fn expand(&self, t: &[u8], caps: &Captures, out: &mut Vec<u8>); }
+```
+Pattern -> tree (parser with char positions for errors) -> instruction list -> backtracking VM over
+UTF-8 bytes with an explicit stack (Try / restore-capture / restore-mark frames), so deep patterns do
+not recurse. Lookaround and atomic groups run a sub-program; captures a successful positive
+lookahead sets are kept and restored on backtracking. Lookbehind tries starts from `pos - min` back to
+`pos - max` (byte length bounds from the tree; unbounded is allowed). `x*` over a body that can match
+empty gets Mark/Check instructions so an empty iteration ends the loop. Counted repeats are unrolled
+(max 1000; program max 200k instructions). Start positions are skipped with a hint computed from the
+tree: a literal prefix (SIMD `find` / `find_ascii_ci`), line starts, text start, or a first-byte set.
+Every instruction costs one step of the caller's budget. `^`/`$` are line anchors unless `(?-m)`.
+`\r\n` and `\R` compile to `\r?\n` because the buffer holds LF line breaks. Case folding is
+Unicode simple folding (single-char lowercase). Whole word wraps the pattern in a guard that only
+applies on a side where the match starts or ends with a word char.
+
+---------------------------------------------------------------------------
+## search.rs — queries and scans
+
+```rust
+pub enum Mode { Plain, Escapes, Regex, NumberRange }
+pub struct Query { pub find, pub replace: String, pub mode: Mode, pub match_case, pub whole_word,
+                   pub fuzzy, pub preserve_case: bool }
+pub type Scope = Option<(usize, usize)>;   // "In the Selection Only"
+impl Searcher {
+    pub fn new(q: &Query) -> Result<Searcher, QueryError>;   // bad Replace text -> replace_error()
+    pub fn find(&mut self, t, from, limit, budget) -> Result<Option<(usize, usize)>, TooComplex>;
+    pub fn rfind(&mut self, t, lo, before, budget) -> ...;
+    pub fn expand(&self, t, out);                           // replacement for the last match
+}
+pub fn find_in(s, t, scope, from, forward, wrap, budget) -> Result<Option<Found>, TooComplex>;
+pub fn count(s, t, scope, budget); pub fn replace_all(s, t, scope, track: &mut [usize], budget);
+pub fn hits(s, t, from, limit, max, with_rep, budget) -> Result<Vec<Hit>, TooComplex>;
+pub fn completions(before: &str, field: Field, groups: usize, names: &[String]) -> Option<(usize, Vec<Completion>)>;
+```
+Plain and escape-sequence text compile to literal regexes. Number range scans number tokens
+(`-?digits(.digits)?`, never starting inside another number) and compares as f64. Fuzzy is Sellers'
+edit-distance column with a swap rule (optimal string alignment), k = len / 4, end extended while the
+distance drops, start found by an anchored backward run. Replace all rebuilds only first-match..last-match
+and maps tracked positions (cursor, anchor, scope end). Budgets: FIND_BUDGET for commands,
+PREVIEW_BUDGET for the live preview and live count. `FIND_TOKENS` / `REPLACE_TOKENS` feed the
+dialog's ">" menus; `completions` feeds its completion list.
+
+---------------------------------------------------------------------------
 ## editor.rs — platform independent
 
 ```rust
@@ -306,7 +369,6 @@ pub struct Editor {
     pub last_was_cut_line: bool,     // consecutive ^K append to cut_buffer (nano semantics)
     pub path: Option<String>,
     pub encoding: Encoding, pub line_ending: LineEnding,
-    pub search: Vec<u8>, pub replace_with: Vec<u8>, pub search_case_sensitive: bool,
     pub tab_width: usize, pub insert_spaces: bool, pub auto_indent: bool,
     pub highlighter: Highlighter,
     pub message: Option<String>,     // transient status-bar message
@@ -338,10 +400,15 @@ impl Editor {
     pub fn duplicate_line(&mut self); pub fn move_line(&mut self, up: bool); pub fn toggle_comment(&mut self);
     pub fn select_all(&mut self);
     pub fn undo(&mut self); pub fn redo(&mut self);
-    /// Search from cursor (forward or backward), wrapping. Selects match. Uses simd::find / find_ascii_ci. Returns found.
-    pub fn find_next(&mut self, forward: bool) -> bool;
-    pub fn replace_one(&mut self) -> bool;                // if selection == search, replace it, then find_next
-    pub fn replace_all(&mut self) -> usize;               // single compound undo step
+    /// Next match after the selection (or previous before it) in scope, wrapping if asked. Selects it.
+    pub fn find(&mut self, s: &mut Searcher, forward: bool, wrap: bool, scope: Scope, budget: &mut u64)
+        -> Result<Option<Found>, TooComplex>;
+    /// If the selection is exactly a match, replace it; then find the next. Returns the moved scope.
+    pub fn replace_next(&mut self, s, wrap, scope, budget) -> Result<(bool, Option<Found>, Scope), TooComplex>;
+    pub fn replace_all(&mut self, s, scope, budget) -> Result<(usize, Scope), TooComplex>; // one undo step
+    pub fn count_matches(&mut self, s, scope, budget) -> Result<usize, TooComplex>;
+    pub fn hits(&mut self, s, first_line, last_line, max, with_rep, budget) -> Result<Vec<Hit>, TooComplex>;
+    pub fn preview_lines(&self, hits: &[Hit], max_chars: usize) -> Vec<(usize, String)>; // line after replace
     pub fn goto_line(&mut self, line_1based: usize, col_1based: usize);
     /// Called before any action that is not cut_line, to reset nano append semantics.
     pub fn reset_cut_chain(&mut self);
@@ -378,8 +445,21 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   wheel scrolls 3 lines (ctrl+wheel zooms). Scrollbars are custom-painted (no WS_VSCROLL): a vertical
   strip on the text's right edge and a horizontal one above the status row (only without wrap, when a
   visible line runs past the view). Hit-tested before the text in mouse messages; WM_SETCURSOR shows an arrow over them.
-- Prompt bar (nano style): find / replace / goto / save-as-confirm prompts typed into the status line
-  area — a tiny inline single-line input owned by App (no EDIT control): Enter confirms, Esc cancels.
+- Prompt bar: goto-line and unsaved-changes prompts typed into the status line area — a tiny inline
+  single-line input owned by App (no EDIT control): Enter confirms, Esc cancels.
+- Find/Replace (find.rs): a modeless dialog from an in-memory DLGTEMPLATEEX (CreateDialogIndirectParamW,
+  Segoe UI 9, laid out in dialog units like EmEditor's Replace dialog; Find mode hides the Replace row
+  and moves the rest up). The dialog procedure only forwards WM_COMMAND to the main window as WM_FIND,
+  so App reads the controls and runs commands from the main window procedure. The message loop calls
+  `find::pre_translate` first (F3 / Shift+F3 / Ctrl+F / Ctrl+H inside the dialog, then
+  IsDialogMessageW). The combo boxes' edits are subclassed for regex completions: a WS_POPUP list box
+  (WS_EX_NOACTIVATE, MA_NOACTIVATE) under the caret; WM_GETDLGCODE asks for all keys while it shows.
+  Options, history (20 per box) and the compiled Searcher live in `FindUi` and outlive the dialog window.
+  Live preview: before each paint, matches for the visible lines (and what each line becomes after
+  Replace) are computed with PREVIEW_BUDGET and cached by (buffer version, query generation, first and
+  last line, mode, scope); the live match count is cached by (version, generation, scope).
+- assets/note.manifest (embedded as RT_MANIFEST 1 by build.rs) selects Common Controls 6, so the
+  dialog, message boxes and buttons use the current Windows look.
   Exit / open with unsaved changes -> nano-style prompt "Save modified buffer? (Y/N/^C)".
   Open/Save As use GetOpenFileNameW/GetSaveFileNameW (comdlg32) because users expect them.
   Save As lists "Text Documents (*.txt)" first: with it selected, a name typed without an extension
@@ -394,6 +474,8 @@ Char boundaries: Left/Right/backspace/delete step over whole UTF-8 scalar values
   highlight_line, convert UTF-8 -> UTF-16 into reusable scratch Vec<u16> while expanding tabs, emit
   ExtTextOutW runs per span color (SetTextColor). Selection: fill rect behind selected columns. Caret: own
   painted bar (no system caret) — blink with SetTimer 530ms, reset on input. Gutter with line numbers.
+  Live preview: match_bg behind every match (under the selection), and the line-after-replace text in
+  preview_fg after the end of each line that has a match ("→ ..."); line breaks show as '↵'.
   Status bar: "path  |  Ln x, Col y  |  Lang  |  UTF-8  |  CRLF  |  message". Hint bar: two rows of
   "^K Cut Line" pairs like nano, built from keymap.chord_for().
   BitBlt memory DC to window DC in WM_PAINT. Invalidate on change only.
