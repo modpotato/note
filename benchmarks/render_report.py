@@ -15,6 +15,8 @@ import math
 import sys
 from pathlib import Path
 
+import corpora  # line statistics for the corpus shape table
+
 REPO = Path(__file__).resolve().parent.parent
 RESULTS = REPO / "benchmarks" / "results"
 OUT = REPO / "benchmarks" / "REPORT.html"
@@ -28,6 +30,11 @@ CODE = CAMPAIGN.get("code_health", {})
 BUILD = CAMPAIGN.get("build", {})
 WIN = CAMPAIGN.get("windows", {})
 CORPORA = CAMPAIGN.get("corpora", {})
+WIN_OK = bool(WIN.get("available"))
+
+
+def mb_of(name):
+    return f"{CORPORA['files'][name]['bytes'] / 1e6:.0f} MB"
 COMP = CAMPAIGN.get("comparisons", {})
 MEM = CAMPAIGN.get("memory", [])
 SUITE = CAMPAIGN.get("suite", []) + CAMPAIGN.get("ablation", [])
@@ -317,7 +324,8 @@ def summary_section():
         (str(fmt["files_with_diffs"]), "files rustfmt would change", f"{fmt['hunks']} hunks; one file is the original examples/bench.rs", "watch"),
         (f"{BUILD['cold_release_s']:.1f} s", "cold release build", "Linux, fat LTO, one codegen unit", "info"),
         (str(len(deps["runtime"])), "runtime dependencies on Linux", f"{len(deps['windows_only'])} Windows-only, {len(deps['build'])} build-time", "good"),
-        (f"{WIN['default_exe_bytes'] / 1000:.0f} KB", "Windows exe, MinGW build", "release build is MSVC; README says about 870 KB", "info"),
+        ((f"{WIN['default_exe_bytes'] / 1000:.0f} KB", "Windows exe, MinGW build", "release build is MSVC; README says about 870 KB", "info")
+         if WIN_OK else ("n/a", "Windows exe", "not built: MinGW or NSIS was missing", "info")),
         (f"{open_m['retained_bytes'] / open_m['file_bytes']:.2f}×", "heap kept after opening 100 MiB", f"{open_m['lines']:,} lines, 8 bytes of index each", "good"),
         (fmt_ns(top["median_ns"]), "keystroke at the top, 100 MiB", "median; it grows with the lines after the cursor", "watch"),
         (f"{min(nsps):.1f}–{max(nsps):.1f} ns", "per regex step", f"the budget stops the worst case in {fmt_ns(worst)}", "good"),
@@ -367,14 +375,18 @@ def verdict_section():
     lookbehind = rec("pipeline", BIG, "regex: lookbehind (?<=\\()\\w+(?=\\))")
     worst_regex = max(rec("regex", "-", n)["median_ns"] for n in ("(a|aa)+c on a^28 b", "(x+x+)+y on x^26", "^(\\w+\\s?)*$ on (w^24)!", ".*.*.*= on 4000 bytes, no =") if rec("regex", "-", n))
     best_regex = min(rec("regex", "-", n)["median_ns"] for n in ("(x+x+)+y on x^26", ".*.*.*= on 4000 bytes, no =") if rec("regex", "-", n))
-    exe, inst = WIN["default_exe_bytes"], WIN["installer_bytes"]
+    exe, inst = (WIN["default_exe_bytes"], WIN["installer_bytes"]) if WIN_OK else (0, 0)
     lb_steps = lookbehind.get("steps", 0) if lookbehind else 0
+    cross_claim = (
+        f"{CROSSCHECK['spanning_newline']} of the whole-text matches cross a newline, which ripgrep's line-by-line search cannot match."
+        if CROSSCHECK and CROSSCHECK["spanning_newline"] else ""
+    )
     verdict_rows = [
         ["Correctness",
          f"{CODE['tests']['passed']} tests pass; {len(agree)} of {len(counts)} match counts equal ripgrep's",
          "good" if CODE["tests"]["failed"] == 0 and not differ else "watch",
          (f"The one difference is {', '.join(f'{abs(e['note_matches'] - e['rg_matches'])} match(es) on {e['label']}' for e in differ)}. "
-          "Those matches cross a newline, which ripgrep's line-by-line search cannot match. The search section has a Python re cross-check of the counts.") if differ else "All counts agree."],
+          + cross_claim + " The search section has a Python re cross-check of the counts.") if differ else "All counts agree."],
         ["SIMD kernels",
          f"ahead of the baseline on {len(fully)} of {len(KERNELS)} kernels at 64 MiB",
          "good" if len(fully) == len(KERNELS) else "watch",
@@ -412,7 +424,9 @@ def verdict_section():
         ["Lookaround at 100 MiB",
          f"one full count needs {lb_steps / 1e6:.0f} M steps; the Find dialog allows {200} M",
          "watch",
-         "The dialog reports 'too complex' for this count on a file this large. By proportion, 10 MiB needs about 25 M steps, inside the budget."],
+         ("The dialog reports 'too complex' for this count on a file this large." if lb_steps > 200_000_000
+          else "The dialog's budget covers this count on a file this large.")
+         + f" By proportion, 10 MiB needs about {lb_steps / 10 / 1e6:.0f} M steps, {'inside' if lb_steps / 10 < 200_000_000 else 'above'} the budget."],
         ["Build and dependencies",
          f"{BUILD['cold_release_s']:.1f} s cold release; {len(CODE['dependencies']['runtime'])} runtime dependencies on Linux",
          "good",
@@ -422,6 +436,8 @@ def verdict_section():
          "watch",
          "Both are above the README's figures. The release binary is an MSVC build, which this machine cannot produce, so the gap is not like-for-like."],
     ]
+    if not WIN_OK:
+        verdict_rows = [row for row in verdict_rows if row[0] != "Size"]
     if WINE:
         verdict_rows.append(["Against Wine's Notepad", wine_headline(), "info",
                              "Both programs ran under the same Wine on the same display. Read the section for caveats."])
@@ -470,7 +486,7 @@ def latency_section():
             rows.append((label, r["median_ns"], r["p10_ns"], r["p90_ns"], "s1"))
     hi = rec("pipeline", "c-headers.h", "highlight whole file (C)")
     if hi:
-        rows.append(("first highlight, whole 37 MB C file", hi["median_ns"], hi["p10_ns"], hi["p90_ns"], "s1"))
+        rows.append((f"first highlight, whole {mb_of('c-headers.h')} C file", hi["median_ns"], hi["p10_ns"], hi["p90_ns"], "s1"))
     worst = rec("regex", "-", "(x+x+)+y on x^26")
     if worst:
         rows.append(("regex, worst case, budget stop", worst["median_ns"], worst["p10_ns"], worst["p90_ns"], "s1"))
@@ -489,7 +505,8 @@ def latency_section():
         "Logarithmic axis. Each row is one operation, timed around the call the window makes.",
         body,
         takeaway=(
-            f"Every keystroke median stays under {fmt_ns(typing_max)} on 100 MiB, inside one 60 Hz frame. "
+            f"Every keystroke median stays under {fmt_ns(typing_max)} on 100 MiB"
+            f"{', inside one 60 Hz frame' if typing_max < 16e6 else ', above one 60 Hz frame'}. "
             f"Operations above 100 ms: {'; '.join(slow_ops) if slow_ops else 'none'}. "
             f"Cursor down is the exception to the size trend: {fmt_ns(rec('editing', MID, 'cursor down')['median_ns'])} at 10 MiB against "
             f"{fmt_ns(rec('editing', BIG, 'cursor down')['median_ns'])} at 100 MiB, and the cause was not isolated."
@@ -599,9 +616,9 @@ def pipeline_section():
         if r:
             rows.append((label, mbs(r["bytes"], r["median_ns"]), name))
     for fname, name, label in (
-        ("c-headers.h", "highlight whole file (C)", "highlight whole file, C (37 MB)"),
-        ("python.py", "highlight whole file (Python)", "highlight whole file, Python (23 MB)"),
-        ("rust.rs", "highlight whole file (Rust)", "highlight whole file, Rust (22 MB)"),
+        ("c-headers.h", "highlight whole file (C)", f"highlight whole file, C ({mb_of('c-headers.h')})"),
+        ("python.py", "highlight whole file (Python)", f"highlight whole file, Python ({mb_of('python.py')})"),
+        ("rust.rs", "highlight whole file (Rust)", f"highlight whole file, Rust ({mb_of('rust.rs')})"),
     ):
         r = rec("pipeline", fname, name)
         if r:
@@ -721,21 +738,22 @@ def search_section():
     )
     agree_table = table(["Query", "note matches", "ripgrep matches", "Agree", "note time", "ripgrep, 1 thread", "ripgrep, 4 threads"], agree_rows, numeric=(1, 2, 4, 5, 6))
     differ = [e for e in counts if e["note_matches"] != e["rg_matches"]]
-    cross_text = (
-        f" A Python re cross-check on the same file, for {esc(CROSSCHECK['pattern'])}, finds {CROSSCHECK['whole_text_matches']:,} matches "
-        f"over the whole text, {CROSSCHECK['per_line_matches']:,} line by line, and {CROSSCHECK['spanning_newline']} that span a newline."
+    cross_para = (
+        f"<p class=\"foot\">A Python re cross-check on the same file, for {esc(CROSSCHECK['pattern'])}, finds "
+        f"{CROSSCHECK['whole_text_matches']:,} matches over the whole text, {CROSSCHECK['per_line_matches']:,} line by line, "
+        f"and {CROSSCHECK['spanning_newline']} that span a newline.</p>"
     ) if CROSSCHECK else ""
     diff_note = ""
     if differ:
         diff_note = (
             "<p class=\"foot\">The mismatch is a construct, not a bug on either side. ripgrep matches one line at a time, "
-            "so a \\s+ that spans a newline cannot match there. note's buffer is searched as one piece." + cross_text + "</p>"
+            "so a \\s+ that spans a newline cannot match there. note's buffer is searched as one piece.</p>"
         )
     return (
         '<section id="search"><h2>Search against ripgrep</h2>'
         '<p class="lede-s">The same file and queries through note\'s search and through ripgrep, the usual fast reference. '
         "A speed number means little without the match counts, so they are compared too.</p>"
-        f"{fig}<h3 class=\"sub-h\">Do the counts agree?</h3>{agree_table}{diff_note}</section>"
+        f"{fig}<h3 class=\"sub-h\">Do the counts agree?</h3>{agree_table}{diff_note}{cross_para}</section>"
     )
 
 
@@ -927,7 +945,7 @@ def regex_section():
         "Classic catastrophic-backtracking patterns. A budget exhaustion is the engine stopping itself at 200 million steps.",
         bar_rows(bars, max(b[1] for b in bars) * 1.1),
         takeaway=(
-            f"The budget holds: every case stops or finishes in under a second, at "
+            f"The budget holds: every case stops or finishes {'in under a second' if max(b[1] for b in bars) < 1e9 else 'inside the budget'}, at "
             f"{min(nsps):.1f}–{max(nsps):.1f} ns per step, "
             "which matches the comment in src/search.rs ('roughly a few nanoseconds each'). Because searches run on the window's thread, that is also how long "
             "the window can stop responding."
@@ -937,8 +955,9 @@ def regex_section():
     if lb:
         lb_note = (
             f"<p class=\"foot\">The lookbehind count on 100 MiB needs {lb['steps'] / 1e6:.0f} M steps for one full count. "
-            "The Find dialog's count uses one budget of 200 M steps for the whole file, so it reports 'too complex' there. Preview is "
-            "budgeted at 4 M steps per call and only covers the lines on screen.</p>"
+            "The Find dialog's count uses one budget of 200 M steps for the whole file. "
+            + ("This count reports 'too complex' there. " if lb["steps"] > 200_000_000 else "This count fits inside that budget. ")
+            + "Preview is budgeted at 4 M steps per call and only covers the lines on screen.</p>"
         )
     return (
         '<section id="regex"><h2>Regex robustness</h2>'
@@ -961,9 +980,11 @@ def build_section():
         ("cold release build", BUILD["cold_release_s"]),
         ("incremental release build (one file touched)", BUILD["incremental_release_s"]),
         ("cold debug build", BUILD["cold_debug_s"]),
-        ("Windows release, cold (MinGW)", WIN["cold_build_s"]),
-        ("Windows release, no embedded font", WIN["nofont_build_s"]),
+        ("Windows release, cold (MinGW)", WIN.get("cold_build_s", 0)),
+        ("Windows release, no embedded font", WIN.get("nofont_build_s", 0)),
     ]
+    if not WIN_OK:
+        build_items = [item for item in build_items if not item[0].startswith("Windows")]
     top_b = max(v for _l, v in build_items)
     build_bars = bar_rows([(l, v, "s1", f"{v:.1f} s", l) for l, v in build_items], top_b * 1.05)
     mod_max = max(per.values())
@@ -997,6 +1018,9 @@ def build_section():
 
 
 def size_section():
+    if not WIN_OK:
+        return ('<section id="size"><h2>Binary size and installer</h2>'
+                '<p class="lede-s">Not measured: MinGW or NSIS was not installed when the campaign ran.</p></section>')
     exe, nofont, inst = WIN["default_exe_bytes"], WIN["nofont_exe_bytes"], WIN["installer_bytes"]
     font_files = sum(WIN["font_files_bytes"].values())
     items = [
@@ -1108,7 +1132,7 @@ def wine_section():
 
 
 def claims_section():
-    exe, nofont, inst = WIN["default_exe_bytes"], WIN["nofont_exe_bytes"], WIN["installer_bytes"]
+    exe, nofont, inst = (WIN["default_exe_bytes"], WIN["nofont_exe_bytes"], WIN["installer_bytes"]) if WIN_OK else (0, 0, 0)
     ns = [r["ns_per_step"] for r in SUITE if r["group"] == "regex" and "ns_per_step" in r]
     live = rec("editing", BIG, "live preview (50 lines, budget 4M)")
     rows = [
@@ -1121,12 +1145,39 @@ def claims_section():
         ['README: the live preview "only searches the lines on screen"', f"50-line preview {fmt_ns(live['median_ns'])} on 100 MiB", Raw(badge("good")), "Holds: the 50-line preview takes under 12 µs at every size in the table."],
         ['README: "Point the bench at a real file"', "examples/bench runs on the 100 MiB corpus", Raw(badge("good")), "Runs and prints the same breakdown; its output is in the results."],
     ]
+    if not WIN_OK:
+        rows = [row for row in rows if not row[0].startswith(('README: "About', 'README: "about 660', 'README: the font', 'README: installer'))]
     return (
         '<section id="claims"><h2>Claims checked</h2>'
         '<p class="lede-s">The README and DESIGN make a few measurable claims. Each is checked against the numbers above. '
         "The verdict says what kind of check was possible on this machine.</p>"
         f'{table(["Claim (source)", "Measured", "Verdict", "Note"], rows)}</section>'
     )
+
+
+def realism_rows():
+    """The generated corpora next to the real code in this repository, measured the same way."""
+
+    def row(label, source, s):
+        return [label, source, f"{s['lines']:,}", f"{s['avg_line_bytes']:.1f}", f"{s['blank_pct']:.1f}%",
+                f"{s['comment_pct']:.1f}%", f"{s['nonascii_pct']:.2f}%", f"{s['longest_line']:,}"]
+
+    def repo(paths):
+        return corpora.line_stats(b"".join(p.read_bytes() for p in paths))
+
+    files = CORPORA.get("files", {})
+    rows = []
+    if "rust.rs" in files:
+        rows.append(row("rust.rs", "generated", files["rust.rs"]["stats"]))
+    rows.append(row("src/*.rs", "repository", repo(sorted((REPO / "src").rglob("*.rs")))))
+    if "python.py" in files:
+        rows.append(row("python.py", "generated", files["python.py"]["stats"]))
+    rows.append(row("benchmarks/*.py", "repository", repo(sorted((REPO / "benchmarks").glob("*.py")))))
+    if "c-headers.h" in files:
+        rows.append(row("c-headers.h", "generated; the repository has no C", files["c-headers.h"]["stats"]))
+    if "mixed-100m.txt" in files:
+        rows.append(row("mixed-100m.txt", "generated", files["mixed-100m.txt"]["stats"]))
+    return rows
 
 
 def method_section():
@@ -1145,6 +1196,7 @@ def method_section():
         ["Wine", WINE.get("wine") if WINE else "not run"],
         ["Commit measured", META["commit"] + (f"; {len(META['dirty_paths'])} uncommitted harness paths" if META["dirty_paths"] else "")],
         ["Campaign started (UTC)", META["generated_utc"]],
+        ["Corpora", f"{CORPORA.get('generator', 'not recorded')}, seed {CORPORA.get('seed', 'n/a')}"],
     ]
     repeat = []
     for r in SUITE:
@@ -1161,27 +1213,32 @@ def method_section():
         "The SSE2 runs use a scratch copy whose dispatch reads NOTE_SIMD. The committed source is unchanged.",
         "The Windows build is MinGW (x86_64-pc-windows-gnu), not MSVC. Its size and speed differ from the release binary's.",
         "Colours follow the dataviz palette reference. In dark mode the three series colours pass every check. In light mode the aqua slot is 2.74:1 on the light surface, under the validator's 3:1 floor, so each chart that uses it also prints its values and has a data table. Status colours appear only as badges that carry an icon and a text label.",
-        "The heap probe's count and replace rows were re-run after a fix to their JSON output. The measurement logic did not change; only the formatting did.",
         "Not measured: native Windows, the Win32 renderer's frame times, real input latency through the window system, and the MSVC binary.",
     ]
-    corpora_note = "Built from real files on this machine by benchmarks/corpora.py. The manifest records each file's digest."
+    corpora_note = ("Generated from a fixed seed by benchmarks/corpora.py, so every clone writes the same bytes. "
+                    "benchmarks/results/corpora.json records each digest, and corpora.py --verify checks them.")
     return (
         '<section id="method"><h2>Method and environment</h2>'
         f'<ul class="method">{"".join(f"<li>{esc(i)}</li>" for i in items)}</ul>'
         f'<h3 class="sub-h">Environment</h3>{table(["Item", "Value"], env)}'
         f'<h3 class="sub-h">Corpora</h3><p class="lede-s">{esc(corpora_note)}</p>'
-        f'{table(["File", "Size", "SHA-256 (first 16 hex digits)"], corpus_rows, numeric=(1,))}</section>'
+        f'{table(["File", "Size", "SHA-256 (first 16 hex digits)"], corpus_rows, numeric=(1,))}'
+        '<h3 class="sub-h">Shape of the corpora</h3>'
+        '<p class="lede-s">The generated corpora next to the real code in this repository, measured the same way.</p>'
+        f'{table(["Corpus", "Source", "Lines", "Bytes per line", "Blank", "Comment-like", "Non-ASCII", "Longest line"], realism_rows(), numeric=(2, 3, 4, 5, 6, 7))}</section>'
     )
 
 
 def reproduce_section():
     return (
         '<section id="reproduce"><h2>Reproduce</h2>'
-        '<pre class="code">python3 benchmarks/corpora.py            # the corpora, about 30 s\n'
-        "python3 benchmarks/run_benchmarks.py      # builds and timed suites, about 25 min\n"
-        "python3 benchmarks/wine_compare.py        # after run_benchmarks.py; note against Wine's Notepad (wine64, Xvfb, xdotool)\n"
-        "python3 benchmarks/crosscheck_search.py   # Python re cross-check of one search count, about 10 s\n"
-        "python3 benchmarks/render_report.py       # writes benchmarks/REPORT.html</pre>"
+        '<pre class="code">python3 benchmarks/run_benchmarks.py --check   # tools present, and what each enables\n'
+        "python3 benchmarks/corpora.py --verify         # corpora regenerate to the committed digests\n"
+        "python3 benchmarks/run_benchmarks.py           # builds, tests, timed suites, memory\n"
+        "python3 benchmarks/wine_compare.py             # note against Wine's Notepad, after run_benchmarks.py\n"
+        "python3 benchmarks/crosscheck_search.py        # Python re cross-check of one search count\n"
+        "python3 benchmarks/render_report.py            # writes benchmarks/REPORT.html</pre>"
+        '<p class="foot">Prerequisites, what is deterministic, and the limits are in benchmarks/README.md.</p>'
         '<p class="foot">Raw results are in benchmarks/results/ (latest.json, wine.json, crosscheck.json). Corpora and build output stay in '
         "target/, which git ignores.</p></section>"
     )
