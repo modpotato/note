@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Runs the whole benchmark campaign and writes benchmarks/results/latest.json.
 
-    python3 benchmarks/run_benchmarks.py            everything (about 15 minutes)
+    python3 benchmarks/run_benchmarks.py --check    which tools are present, and what they enable
+    python3 benchmarks/run_benchmarks.py            everything (about 25 minutes)
     python3 benchmarks/run_benchmarks.py --quick    skips the 100 MiB encoding variants
 
-Order matters. Every build happens before the first timed run, and the timed runs go one
-at a time, so no compile competes with a measurement. Each failing step is recorded in the
-results rather than aborting the campaign. Then render the report with render_report.py.
+Before anything runs, the corpora in target/bench-data must match the digests committed in
+benchmarks/results/corpora.json. Missing corpora are generated; mismatched ones stop the run.
+Order matters: every build happens before the first timed run, and the timed runs go one at a
+time, so no compile competes with a measurement. A failing step is recorded in the results
+rather than aborting the campaign. Then run wine_compare.py and render_report.py.
 """
 
 import json
@@ -21,6 +24,8 @@ import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
+
+import corpora  # the seeded corpora and their digests, in this directory
 
 REPO = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get("BENCH_DATA", REPO / "target" / "bench-data"))
@@ -104,6 +109,60 @@ def environment():
         "makensis": tool_version(["makensis", "-VERSION"]),
         "release_profile": tomllib.loads((REPO / "Cargo.toml").read_text())["profile"]["release"],
     }
+
+
+# ---- preflight ----------------------------------------------------------------------------
+
+REQUIRED = {  # tool -> how to get it
+    "cargo": "install Rust with rustup: https://rustup.rs",
+    "rustc": "install Rust with rustup: https://rustup.rs",
+    "rg": "apt install ripgrep",
+    "iconv": "apt install libc-bin",
+    "wc": "coreutils (preinstalled on Linux)",
+    "cat": "coreutils (preinstalled on Linux)",
+    "git": "apt install git",
+}
+OPTIONAL = {  # tool -> (what it enables, how to get it)
+    "x86_64-w64-mingw32-gcc": ("the Windows build and its sizes", "apt install gcc-mingw-w64-x86-64"),
+    "makensis": ("the installer size", "apt install nsis"),
+}
+
+
+def preflight():
+    """What this machine can run, as (rows, missing required tools). Optional gaps only skip phases."""
+    rows, missing = [], []
+    for name, hint in REQUIRED.items():
+        present = shutil.which(name) is not None
+        rows.append({"tool": name, "present": present, "version": tool_version([name, "--version"]) if present else None, "hint": hint})
+        if not present:
+            missing.append(name)
+    for name, (enables, hint) in OPTIONAL.items():
+        rows.append({"tool": name, "present": shutil.which(name) is not None, "enables": enables, "hint": hint})
+    installed = sh(["rustup", "target", "list", "--installed"], timeout=60)[1].split() if shutil.which("rustup") else []
+    rows.append({"tool": f"rustup target {WIN}", "present": WIN in installed, "enables": "the Windows build", "hint": f"rustup target add {WIN}"})
+    return rows, missing
+
+
+def print_rows(rows):
+    for row in rows:
+        if row["present"]:
+            print(f"  ok       {row['tool']:<28} {row.get('version') or row.get('enables', '')}")
+        else:
+            print(f"  MISSING  {row['tool']:<28} {row.get('enables', 'required')}; {row['hint']}")
+
+
+def check_only():
+    rows, missing = preflight()
+    print_rows(rows)
+    if (DATA / "manifest.json").exists():
+        problems = corpora.check_files()
+        print("  corpora " + ("match benchmarks/results/corpora.json" if not problems else "differ: " + "; ".join(problems)))
+    else:
+        print("  corpora not built yet; the run builds them")
+    if missing:
+        print(f"\nmissing required tools: {', '.join(missing)}")
+        return 1
+    return 0
 
 
 # ---- code health ----------------------------------------------------------------------
@@ -204,6 +263,8 @@ def code_health():
 
 
 def build_times():
+    """Cold and incremental release builds, and a cold debug build. The incremental build
+    touches src/editor.rs, which changes only its modification time."""
     times = {}
     shutil.rmtree(SCRATCH / "cold-release", ignore_errors=True)
     _, _, dt = must(
@@ -384,9 +445,14 @@ def build_ablation():
 
 
 def main():
+    if "--check" in sys.argv:
+        sys.exit(check_only())
+    rows, missing = preflight()
+    if missing:
+        sys.exit(f"missing required tools: {', '.join(missing)}; see python3 benchmarks/run_benchmarks.py --check")
     RESULTS.mkdir(parents=True, exist_ok=True)
     SCRATCH.mkdir(parents=True, exist_ok=True)
-    campaign = {"meta": environment(), "errors": []}
+    campaign = {"meta": environment(), "preflight": rows, "errors": []}
     log(f"commit {campaign['meta']['commit']}, {len(campaign['meta']['dirty_paths'])} uncommitted paths")
 
     def attempt(name, fn):
@@ -398,8 +464,11 @@ def main():
             return None
 
     if not (DATA / "manifest.json").exists():
-        must(["python3", str(REPO / "benchmarks" / "corpora.py")], timeout=1800)
-    campaign["corpora"] = json.loads((DATA / "manifest.json").read_text())
+        corpora.build()
+    problems = corpora.check_files()
+    if problems:
+        sys.exit("corpora differ from benchmarks/results/corpora.json: " + "; ".join(problems) + "\n  run: python3 benchmarks/corpora.py")
+    campaign["corpora"] = json.loads(corpora.RECORD.read_text())
 
     campaign["code_health"] = attempt("code health", code_health) or {}
     log("code health done")

@@ -10,8 +10,9 @@ translation layer, fonts and window system. For each file size the script record
   typing_cpu_s    CPU seconds the app spends on a burst of keystrokes typed at the start
   typing_wall_s   wall seconds for the burst, including the wait until the app is quiet
 
-Needs wine64 (or wine), Xvfb and xdotool, plus the Windows build made by run_benchmarks.py.
-Writes benchmarks/results/wine.json. Run it after run_benchmarks.py so nothing competes.
+Needs wine64 (or wine), Xvfb and xdotool, the Windows build that run_benchmarks.py makes, and
+the corpora. Writes benchmarks/results/wine.json. Run it after run_benchmarks.py, so that no
+compile competes with a measurement. --quick is a one-repeat smoke test at 1 MiB.
 
     python3 benchmarks/wine_compare.py
 """
@@ -28,9 +29,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import corpora  # the seeded corpora, in this directory
+
 REPO = Path(__file__).resolve().parent.parent
 SCRATCH = REPO / "target" / "bench-scratch"
-DATA = REPO / "target" / "bench-data"
+DATA = corpora.DATA
 PREFIX = SCRATCH / "wineprefix"
 OUT = REPO / "benchmarks" / "results" / "wine.json"
 DISPLAY = ":99"
@@ -68,6 +71,19 @@ APPS = {
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def preflight():
+    """Stops before any Wine work, naming the fix, when a prerequisite is missing."""
+    if shutil.which("wine64") is None and shutil.which("wine") is None:
+        sys.exit("wine is missing: sudo apt install wine wine64")
+    missing = [name for name in ("Xvfb", "xdotool") if shutil.which(name) is None]
+    if missing:
+        sys.exit(f"missing {', '.join(missing)}: sudo apt install xvfb xdotool")
+    if not APPS["note"]["exe"].exists():
+        sys.exit(f"{APPS['note']['exe']} is missing: run python3 benchmarks/run_benchmarks.py first")
+    if corpora.check_files():
+        sys.exit("the corpora do not match benchmarks/results/corpora.json: run python3 benchmarks/corpora.py")
 
 
 def wine_bin():
@@ -306,6 +322,7 @@ def summarise(runs):
 
 
 def main():
+    preflight()
     wine = wine_bin()
     env = env_for_wine()
     display = start_display()

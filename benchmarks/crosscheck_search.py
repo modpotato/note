@@ -8,25 +8,33 @@ the two tools is checked rather than assumed.
 Run after benchmarks/corpora.py. Writes benchmarks/results/crosscheck.json.
 """
 
+import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
+import corpora
+
 REPO = Path(__file__).resolve().parent.parent
-CORPUS = REPO / "target" / "bench-data" / "mixed-100m.txt"
+CORPUS = corpora.DATA / "mixed-100m.txt"
 RESULTS = REPO / "benchmarks" / "results" / "crosscheck.json"
 PATTERN = r"\bfn\s+\w+"
 
 
 def main():
+    raw = CORPUS.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != corpora.committed()["mixed-100m.txt"]["sha256"]:
+        sys.exit("mixed-100m.txt differs from benchmarks/results/corpora.json: run python3 benchmarks/corpora.py")
     pattern = re.compile(PATTERN)
-    text = CORPUS.read_bytes().decode("utf-8")
+    text = raw.decode("utf-8")
     whole = list(pattern.finditer(text))
     spanning = sum(1 for m in whole if "\n" in m.group(0))
     per_line = sum(len(pattern.findall(line)) for line in text.split("\n"))
     out = {
         "file": CORPUS.name,
+        "sha256": digest,
         "pattern": PATTERN,
         "python": sys.version.split()[0],
         "whole_text_matches": len(whole),
